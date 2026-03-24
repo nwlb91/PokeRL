@@ -455,14 +455,14 @@ class PokeRLApp(tk.Tk):
                 self._trainer = trainer
 
                 # Monkey-patch the trainer's train loop to check the stop flag
-                original_run_battle = trainer._run_battle
+                original_run_battle = trainer._run_battle_batch
 
-                async def stoppable_run_battle():
+                async def stoppable_run_battle(n_battles):
                     if self._training_stop.is_set():
                         raise _TrainingStoppedError()
-                    return await original_run_battle()
+                    return await original_run_battle(n_battles)
 
-                trainer._run_battle = stoppable_run_battle
+                trainer._run_battle_batch = stoppable_run_battle
 
                 future = run_async(trainer.train())
                 future.result()  # blocks until done or error
