@@ -65,6 +65,8 @@ def parse_args():
                         help="Weight of WP-shaped reward (0=sparse only, 1=WP only)")
     parser.add_argument("--ko-reward-weight", type=float, default=0.15,
                         help="Weight of KO differential in terminal reward")
+    parser.add_argument("--damage-reward-weight", type=float, default=0.1,
+                        help="Weight of damage differential in terminal reward")
     parser.add_argument("--survival-reward", type=float, default=0.005,
                         help="Per-turn survival bonus for mid-battle steps")
 
@@ -123,6 +125,7 @@ def main():
         ppo_epochs=args.ppo_epochs,
         wp_reward_weight=args.wp_reward_weight,
         ko_reward_weight=args.ko_reward_weight,
+        damage_reward_weight=args.damage_reward_weight,
         survival_reward_per_turn=args.survival_reward,
         league_size=args.league_size,
         checkpoint_interval=args.checkpoint_interval,

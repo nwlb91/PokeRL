@@ -219,8 +219,17 @@ class Trainer:
             # variance in terminal reward (prevents gradient collapse
             # in hopeless matchups).
             ko_w = self.config.ko_reward_weight
-            p1_reward = p1_base + ko_w * player1.get_ko_differential()
-            p2_reward = p2_base + ko_w * player2.get_ko_differential()
+            dmg_w = self.config.damage_reward_weight
+            p1_reward = (
+                p1_base
+                + ko_w * player1.get_ko_differential()
+                + dmg_w * player1.get_damage_differential()
+            )
+            p2_reward = (
+                p2_base
+                + ko_w * player2.get_ko_differential()
+                + dmg_w * player2.get_damage_differential()
+            )
 
             # Apply reward shaping
             self._apply_reward_shaping(player1, p1_reward)

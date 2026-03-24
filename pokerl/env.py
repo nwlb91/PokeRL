@@ -76,6 +76,12 @@ class RLPlayer(Player):
         self._own_fainted = 0
         self._opp_fainted = 0
 
+        # Damage tracking for reward shaping
+        self._own_total_hp_lost = 0.0
+        self._opp_total_hp_lost = 0.0
+        self._prev_own_hp: Optional[float] = None
+        self._prev_opp_hp: Optional[float] = None
+
     def teampreview(self, battle: Battle) -> str:
         """Select a lead using the team preview network."""
         obs = embed_team_preview(battle)
@@ -109,6 +115,17 @@ class RLPlayer(Player):
             self._opp_fainted = sum(
                 1 for m in battle.opponent_team.values() if m.fainted
             )
+
+            # Track damage dealt/received for reward shaping
+            own_hp = sum(m.current_hp_fraction for m in battle.team.values())
+            opp_hp = sum(m.current_hp_fraction for m in battle.opponent_team.values())
+            if self._prev_own_hp is not None:
+                own_delta = self._prev_own_hp - own_hp
+                opp_delta = self._prev_opp_hp - opp_hp
+                self._own_total_hp_lost += max(0.0, own_delta)
+                self._opp_total_hp_lost += max(0.0, opp_delta)
+            self._prev_own_hp = own_hp
+            self._prev_opp_hp = opp_hp
 
         # If we have a previous step, record its reward (0 for mid-battle)
         if self.collect_data and self._prev_obs is not None:
@@ -186,6 +203,15 @@ class RLPlayer(Player):
         """Return collected observations for win probability training."""
         return self._battle_observations
 
+    def get_damage_differential(self) -> float:
+        """Return normalised damage differential: (opp HP lost - own HP lost) / 6.
+
+        Positive means we dealt more damage than we received.  Each side can
+        lose at most 6 HP-fractions (one per Pokémon), so dividing by 6 keeps
+        the value in [-1, 1].
+        """
+        return (self._opp_total_hp_lost - self._own_total_hp_lost) / 6.0
+
     def get_ko_differential(self) -> float:
         """Return normalised KO differential: (our KOs - their KOs) / 6.
 
@@ -208,6 +234,10 @@ class RLPlayer(Player):
         self._team_preview_value = None
         self._own_fainted = 0
         self._opp_fainted = 0
+        self._own_total_hp_lost = 0.0
+        self._opp_total_hp_lost = 0.0
+        self._prev_own_hp = None
+        self._prev_opp_hp = None
 
 
 def load_team(path: str) -> str:

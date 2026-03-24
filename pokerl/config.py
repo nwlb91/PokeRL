@@ -36,6 +36,7 @@ class Config:
     wp_train_interval: int = 10  # train every N battles
     wp_reward_weight: float = 0.5  # weight of WP-shaped reward vs sparse
     ko_reward_weight: float = 0.15  # weight for KO differential in terminal reward
+    damage_reward_weight: float = 0.1  # weight for damage differential in terminal reward
     survival_reward_per_turn: float = 0.005  # small per-turn bonus for staying alive
 
     # --- AlphaStar League ---
