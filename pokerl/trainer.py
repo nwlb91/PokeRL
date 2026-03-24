@@ -27,6 +27,7 @@ from pokerl.checkpoint import CheckpointManager
 from pokerl.config import Config
 from pokerl.env import RLPlayer, create_player, load_team
 from pokerl.league import League
+from pokerl.plateau import PlateauDetector, PlateauInfo
 from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,16 @@ class Trainer:
         # Persistent players — reused across battles to avoid reconnections
         self._player1: Optional[RLPlayer] = None
         self._player2: Optional[RLPlayer] = None
+
+        # Plateau detector — window and patience scale with checkpoint interval
+        # so that the detector has enough granularity regardless of how often
+        # we sample.  Default: 20-observation window, 10-observation patience.
+        self.plateau_detector = PlateauDetector(
+            window=20,
+            patience=10,
+            alpha=0.05,
+            cv_threshold=0.10,
+        )
 
         # Concurrency
         self._n_concurrent = max(1, config.num_parallel_battles)
@@ -149,13 +160,27 @@ class Trainer:
                     f"mean_pred={wp_metrics.get('wp_mean_pred', 0):.3f}"
                 )
 
-            # Periodic logging
+            # Periodic logging + plateau detection
             if self.battle_count % 50 == 0:
                 self._log_stats()
 
+                # Feed win rate to the plateau detector at each log interval
+                wr = self._recent_win_rate()
+                plateau_info = self.plateau_detector.update(wr, self.battle_count)
+                if plateau_info.is_plateau and plateau_info.streak == self.plateau_detector.patience:
+                    logger.warning(
+                        f"Learning plateau detected at battle {self.battle_count} "
+                        f"(win rate ~{wr:.1%}, slope={plateau_info.slope:.6f}, "
+                        f"p={plateau_info.p_value:.3f})"
+                    )
+
             # Progress callback (for GUI progress bar etc.)
             if self._progress_callback:
-                self._progress_callback(self.battle_count, self.config.total_battles)
+                self._progress_callback(
+                    self.battle_count,
+                    self.config.total_battles,
+                    self.plateau_detector,
+                )
 
         # Final checkpoint
         self._checkpoint_and_snapshot()

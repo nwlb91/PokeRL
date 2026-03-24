@@ -19,6 +19,12 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Patch
+
 import torch
 
 from pokerl.agent import PPOAgent
@@ -26,6 +32,7 @@ from pokerl.checkpoint import CheckpointManager
 from pokerl.config import Config
 from pokerl.env import create_player, load_team
 from pokerl.league import League
+from pokerl.plateau import PlateauDetector
 from pokerl.trainer import Trainer
 from pokerl.win_probability import WinProbabilityEstimator
 
@@ -82,7 +89,7 @@ class PokeRLApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PokeRL \u2014 Pokemon Battle RL Trainer")
-        self.geometry("960x780")
+        self.geometry("960x920")
         self.minsize(800, 600)
 
         # --- State ---
@@ -111,7 +118,7 @@ class PokeRLApp(tk.Tk):
         self.hidden_var = tk.IntVar(value=256)
         self.device_var = tk.StringVar(value="cpu")
         self.server_port_var = tk.IntVar(value=8000)
-        self.showdown_path_var = tk.StringVar(value="")
+        self.showdown_path_var = tk.StringVar(value="pokemon-showdown")
         self.eval_n_battles_var = tk.IntVar(value=50)
 
         self._build_ui()
@@ -201,9 +208,27 @@ class PokeRLApp(tk.Tk):
         self.train_elapsed_var = tk.StringVar(value="Elapsed: --")
         self.train_eta_var = tk.StringVar(value="ETA: --")
         self.train_battles_var = tk.StringVar(value="")
+        self.train_plateau_var = tk.StringVar(value="")
         ttk.Label(time_frame, textvariable=self.train_battles_var, foreground="gray").pack(side="left", padx=(0, 16))
         ttk.Label(time_frame, textvariable=self.train_elapsed_var).pack(side="left", padx=(0, 16))
         ttk.Label(time_frame, textvariable=self.train_eta_var).pack(side="left")
+        self._plateau_label = ttk.Label(time_frame, textvariable=self.train_plateau_var, foreground="red")
+        self._plateau_label.pack(side="right", padx=(16, 0))
+
+        # --- Win-rate chart with plateau visualisation ---
+        chart_frame = ttk.LabelFrame(parent, text="Win Rate & Plateau Detection")
+        chart_frame.pack(fill="both", expand=True, padx=6, pady=4)
+
+        self._fig, self._ax = plt.subplots(figsize=(7, 2.4), dpi=90)
+        self._fig.patch.set_facecolor("#f0f0f0")
+        self._ax.set_xlabel("Battle")
+        self._ax.set_ylabel("Win Rate")
+        self._ax.set_ylim(-0.05, 1.05)
+        self._ax.axhline(y=0.5, color="gray", linewidth=0.5, linestyle="--")
+        self._fig.tight_layout(pad=1.5)
+
+        self._canvas = FigureCanvasTkAgg(self._fig, master=chart_frame)
+        self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=2, pady=2)
 
     # -- Evaluation tab ------------------------------------------------------
 
@@ -365,8 +390,9 @@ class PokeRLApp(tk.Tk):
             return f"{m}m {s:02d}s"
         return f"{s}s"
 
-    def _on_progress_update(self, battle_count: int, total_battles: int):
-        """Update progress bar and time labels. Must be called on the main thread."""
+    def _on_progress_update(self, battle_count: int, total_battles: int,
+                            plateau_detector: "PlateauDetector | None" = None):
+        """Update progress bar, time labels, and plateau chart."""
         pct = battle_count / total_battles * 100 if total_battles else 0
         self.train_progress["value"] = pct
         self.train_battles_var.set(f"{battle_count}/{total_battles} battles")
@@ -382,6 +408,65 @@ class PokeRLApp(tk.Tk):
             elapsed = time.time() - self._training_start_time
             self.train_elapsed_var.set(f"Elapsed: {self._format_duration(elapsed)}")
             self.train_eta_var.set("ETA: --")
+
+        # Update the plateau chart
+        if plateau_detector is not None:
+            self._update_plateau_chart(plateau_detector)
+
+    def _update_plateau_chart(self, detector: "PlateauDetector"):
+        """Redraw the win-rate chart with plateau shading."""
+        wr_hist = detector._win_rates
+        bc_hist = detector._battle_counts
+        if not wr_hist:
+            return
+
+        ax = self._ax
+        ax.clear()
+
+        # Style
+        ax.set_xlabel("Battle", fontsize=9)
+        ax.set_ylabel("Win Rate", fontsize=9)
+        ax.set_ylim(-0.05, 1.05)
+        ax.axhline(y=0.5, color="gray", linewidth=0.5, linestyle="--")
+        ax.tick_params(labelsize=8)
+
+        # Win rate line
+        ax.plot(bc_hist, wr_hist, color="#1f77b4", linewidth=1.5, label="Win Rate")
+
+        # Shade plateau regions in red
+        regions = list(detector._plateau_regions)
+        if detector._in_plateau_since is not None:
+            regions.append((detector._in_plateau_since, len(wr_hist) - 1))
+
+        for start_idx, end_idx in regions:
+            start_idx = max(0, min(start_idx, len(bc_hist) - 1))
+            end_idx = max(0, min(end_idx, len(bc_hist) - 1))
+            ax.axvspan(
+                bc_hist[start_idx], bc_hist[end_idx],
+                alpha=0.25, color="#d62728", zorder=0,
+            )
+
+        # Legend
+        handles = [
+            plt.Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="Win Rate"),
+            Patch(facecolor="#d62728", alpha=0.25, label="Plateau"),
+        ]
+        ax.legend(handles=handles, fontsize=8, loc="upper left")
+
+        # Plateau status label
+        is_plateau = detector._streak >= detector.patience
+        if is_plateau:
+            self.train_plateau_var.set("PLATEAU DETECTED")
+            self._plateau_label.configure(foreground="red")
+        elif len(wr_hist) < detector.window:
+            self.train_plateau_var.set(f"Collecting data ({len(wr_hist)}/{detector.window})")
+            self._plateau_label.configure(foreground="gray")
+        else:
+            self.train_plateau_var.set("Learning")
+            self._plateau_label.configure(foreground="green")
+
+        self._fig.tight_layout(pad=1.5)
+        self._canvas.draw_idle()
 
     def _make_config(self, **overrides) -> Config:
         """Build a Config from current GUI state."""
@@ -500,8 +585,9 @@ class PokeRLApp(tk.Tk):
         self.train_elapsed_var.set("Elapsed: 0s")
         self.train_eta_var.set("ETA: --")
 
-        def _progress_cb(battle_count, total_battles):
-            self.after(0, lambda: self._on_progress_update(battle_count, total_battles))
+        def _progress_cb(battle_count, total_battles, plateau_detector=None):
+            self.after(0, lambda bc=battle_count, tb=total_battles, pd=plateau_detector:
+                       self._on_progress_update(bc, tb, pd))
 
         def train_thread():
             try:
@@ -544,6 +630,7 @@ class PokeRLApp(tk.Tk):
         self.train_battles_var.set("")
         self.train_elapsed_var.set("Elapsed: --")
         self.train_eta_var.set("ETA: --")
+        self.train_plateau_var.set("")
 
     # ----- Evaluation control -----------------------------------------------
 
