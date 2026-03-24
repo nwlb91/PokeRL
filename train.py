@@ -60,9 +60,13 @@ def parse_args():
     parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--ppo-epochs", type=int, default=4)
 
-    # Win probability
+    # Win probability & reward shaping
     parser.add_argument("--wp-reward-weight", type=float, default=0.5,
                         help="Weight of WP-shaped reward (0=sparse only, 1=WP only)")
+    parser.add_argument("--ko-reward-weight", type=float, default=0.15,
+                        help="Weight of KO differential in terminal reward")
+    parser.add_argument("--survival-reward", type=float, default=0.005,
+                        help="Per-turn survival bonus for mid-battle steps")
 
     # AlphaStar League
     parser.add_argument("--league-size", type=int, default=20)
@@ -118,6 +122,8 @@ def main():
         num_parallel_battles=args.num_parallel_battles,
         ppo_epochs=args.ppo_epochs,
         wp_reward_weight=args.wp_reward_weight,
+        ko_reward_weight=args.ko_reward_weight,
+        survival_reward_per_turn=args.survival_reward,
         league_size=args.league_size,
         checkpoint_interval=args.checkpoint_interval,
         pfsp_temperature=args.pfsp_temperature,

@@ -35,6 +35,8 @@ class Config:
     wp_batch_size: int = 256
     wp_train_interval: int = 10  # train every N battles
     wp_reward_weight: float = 0.5  # weight of WP-shaped reward vs sparse
+    ko_reward_weight: float = 0.15  # weight for KO differential in terminal reward
+    survival_reward_per_turn: float = 0.005  # small per-turn bonus for staying alive
 
     # --- AlphaStar League ---
     league_size: int = 20  # max agents in the league

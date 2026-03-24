@@ -72,6 +72,10 @@ class RLPlayer(Player):
         self._team_preview_log_prob = None
         self._team_preview_value = None
 
+        # KO tracking for reward shaping
+        self._own_fainted = 0
+        self._opp_fainted = 0
+
     def teampreview(self, battle: Battle) -> str:
         """Select a lead using the team preview network."""
         obs = embed_team_preview(battle)
@@ -99,6 +103,12 @@ class RLPlayer(Player):
         # Store observation for win probability training
         if self.collect_data:
             self._battle_observations.append(obs)
+
+            # Track KO counts for reward shaping
+            self._own_fainted = sum(1 for m in battle.team.values() if m.fainted)
+            self._opp_fainted = sum(
+                1 for m in battle.opponent_team.values() if m.fainted
+            )
 
         # If we have a previous step, record its reward (0 for mid-battle)
         if self.collect_data and self._prev_obs is not None:
@@ -176,6 +186,14 @@ class RLPlayer(Player):
         """Return collected observations for win probability training."""
         return self._battle_observations
 
+    def get_ko_differential(self) -> float:
+        """Return normalised KO differential: (our KOs - their KOs) / 6.
+
+        Positive means we knocked out more of theirs than they knocked out
+        of ours.  Used to provide gradient signal even in hopeless matchups.
+        """
+        return (self._opp_fainted - self._own_fainted) / 6.0
+
     def _reset_episode_state(self):
         self._battle_observations = []
         self._prev_obs = None
@@ -188,6 +206,8 @@ class RLPlayer(Player):
         self._team_preview_action = None
         self._team_preview_log_prob = None
         self._team_preview_value = None
+        self._own_fainted = 0
+        self._opp_fainted = 0
 
 
 def load_team(path: str) -> str:

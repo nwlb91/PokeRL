@@ -27,10 +27,18 @@ from matplotlib.patches import Patch
 
 import torch
 
+from poke_env.ps_client.account_configuration import AccountConfiguration
+from poke_env.ps_client.server_configuration import (
+    LocalhostServerConfiguration,
+    ServerConfiguration,
+    ShowdownServerConfiguration,
+)
+from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
+
 from pokerl.agent import PPOAgent
 from pokerl.checkpoint import CheckpointManager
 from pokerl.config import Config
-from pokerl.env import create_player, load_team
+from pokerl.env import RLPlayer, create_player, load_team
 from pokerl.league import League
 from pokerl.plateau import PlateauDetector
 from pokerl.trainer import Trainer
@@ -121,6 +129,18 @@ class PokeRLApp(tk.Tk):
         self.showdown_path_var = tk.StringVar(value="pokemon-showdown")
         self.eval_n_battles_var = tk.IntVar(value=50)
 
+        # Challenge tab variables
+        self.challenge_checkpoint_var = tk.StringVar(value="")
+        self.challenge_team_var = tk.StringVar(value="")
+        self.challenge_server_var = tk.StringVar(value="local")  # "local" or "live"
+        self.challenge_local_port_var = tk.IntVar(value=8000)
+        self.challenge_username_var = tk.StringVar(value="")
+        self.challenge_password_var = tk.StringVar(value="")
+        self.challenge_opponent_var = tk.StringVar(value="")
+        self.challenge_format_var = tk.StringVar(value="gen9nationaldexmonotype")
+        self.challenge_n_var = tk.IntVar(value=1)
+        self._challenge_stop = threading.Event()
+
         self._build_ui()
         self._poll_log_queue()
 
@@ -140,7 +160,12 @@ class PokeRLApp(tk.Tk):
         notebook.add(eval_frame, text="  Evaluation  ")
         self._build_eval_tab(eval_frame)
 
-        # --- Tab 3: Server ---
+        # --- Tab 3: Challenge ---
+        challenge_frame = ttk.Frame(notebook)
+        notebook.add(challenge_frame, text="  Challenge  ")
+        self._build_challenge_tab(challenge_frame)
+
+        # --- Tab 4: Server ---
         server_frame = ttk.Frame(notebook)
         notebook.add(server_frame, text="  Server  ")
         self._build_server_tab(server_frame)
@@ -316,6 +341,85 @@ class PokeRLApp(tk.Tk):
 
         self.server_status_var = tk.StringVar(value="Server: stopped")
         ttk.Label(ctrl, textvariable=self.server_status_var, foreground="gray").pack(side="left", padx=12)
+
+    # -- Challenge tab -------------------------------------------------------
+
+    def _build_challenge_tab(self, parent):
+        # --- Model & Team ---
+        model_frame = ttk.LabelFrame(parent, text="Model & Team")
+        model_frame.pack(fill="x", padx=6, pady=4)
+
+        self._file_row(model_frame, "Checkpoint:", self.challenge_checkpoint_var, 0)
+        self._file_row(model_frame, "Team file:", self.challenge_team_var, 1)
+
+        # --- Server ---
+        server_frame = ttk.LabelFrame(parent, text="Server")
+        server_frame.pack(fill="x", padx=6, pady=4)
+
+        row = 0
+        ttk.Label(server_frame, text="Server:").grid(row=row, column=0, sticky="e", **PADDING)
+        srv_inner = ttk.Frame(server_frame)
+        srv_inner.grid(row=row, column=1, sticky="w", **PADDING)
+        ttk.Radiobutton(srv_inner, text="Local", variable=self.challenge_server_var, value="local").pack(side="left", padx=(0, 8))
+        ttk.Radiobutton(srv_inner, text="Pokemon Showdown (live)", variable=self.challenge_server_var, value="live").pack(side="left")
+
+        row = 1
+        ttk.Label(server_frame, text="Local port:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(server_frame, textvariable=self.challenge_local_port_var, width=8).grid(row=row, column=1, sticky="w", **PADDING)
+
+        row = 2
+        ttk.Label(server_frame, text="Username:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(server_frame, textvariable=self.challenge_username_var, width=30).grid(row=row, column=1, sticky="w", **PADDING)
+
+        row = 3
+        ttk.Label(server_frame, text="Password:").grid(row=row, column=0, sticky="e", **PADDING)
+        pw_entry = ttk.Entry(server_frame, textvariable=self.challenge_password_var, width=30, show="*")
+        pw_entry.grid(row=row, column=1, sticky="w", **PADDING)
+        ttk.Label(server_frame, text="(required for live server)", foreground="gray").grid(row=row, column=2, sticky="w", **PADDING)
+
+        server_frame.columnconfigure(1, weight=1)
+
+        # --- Challenge settings ---
+        ch_frame = ttk.LabelFrame(parent, text="Challenge")
+        ch_frame.pack(fill="x", padx=6, pady=4)
+
+        row = 0
+        ttk.Label(ch_frame, text="Opponent username:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(ch_frame, textvariable=self.challenge_opponent_var, width=30).grid(row=row, column=1, sticky="w", **PADDING)
+
+        row = 1
+        ttk.Label(ch_frame, text="Battle format:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(ch_frame, textvariable=self.challenge_format_var, width=30).grid(row=row, column=1, sticky="w", **PADDING)
+
+        row = 2
+        ttk.Label(ch_frame, text="Number of challenges:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(ch_frame, textvariable=self.challenge_n_var, width=8).grid(row=row, column=1, sticky="w", **PADDING)
+
+        ch_frame.columnconfigure(1, weight=1)
+
+        # --- Controls ---
+        ctrl = ttk.Frame(parent)
+        ctrl.pack(fill="x", padx=6, pady=6)
+
+        self.btn_challenge = ttk.Button(ctrl, text="Send Challenge", command=self._on_send_challenge)
+        self.btn_challenge.pack(side="left", padx=4)
+        self.btn_stop_challenge = ttk.Button(ctrl, text="Stop", command=self._on_stop_challenge, state="disabled")
+        self.btn_stop_challenge.pack(side="left", padx=4)
+
+        self.challenge_status_var = tk.StringVar(value="Idle")
+        ttk.Label(ctrl, textvariable=self.challenge_status_var, foreground="gray").pack(side="left", padx=12)
+
+        # --- Results ---
+        res_frame = ttk.LabelFrame(parent, text="Results")
+        res_frame.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        cols = ("Battle", "Result")
+        self.challenge_tree = ttk.Treeview(res_frame, columns=cols, show="headings", height=8)
+        self.challenge_tree.heading("Battle", text="Battle #")
+        self.challenge_tree.heading("Result", text="Result")
+        self.challenge_tree.column("Battle", width=100, anchor="center")
+        self.challenge_tree.column("Result", width=200, anchor="center")
+        self.challenge_tree.pack(fill="both", expand=True, padx=2, pady=2)
 
     # ----- Helpers -----------------------------------------------------------
 
@@ -761,6 +865,140 @@ class PokeRLApp(tk.Tk):
         self.btn_eval.config(state="normal")
         self.btn_stop_eval.config(state="disabled")
         self.eval_status_var.set("Idle")
+
+    # ----- Challenge control ------------------------------------------------
+
+    def _on_send_challenge(self):
+        ckpt_path = self.challenge_checkpoint_var.get().strip()
+        team_path = self.challenge_team_var.get().strip()
+        opponent = self.challenge_opponent_var.get().strip()
+        username = self.challenge_username_var.get().strip()
+
+        if not ckpt_path or not os.path.isfile(ckpt_path):
+            messagebox.showerror("Error", f"Checkpoint not found: {ckpt_path}")
+            return
+        if not team_path or not os.path.isfile(team_path):
+            messagebox.showerror("Error", f"Team file not found: {team_path}")
+            return
+        if not opponent:
+            messagebox.showerror("Error", "Please enter an opponent username.")
+            return
+        if not username:
+            messagebox.showerror("Error", "Please enter your username.")
+            return
+
+        server_type = self.challenge_server_var.get()
+        password = self.challenge_password_var.get().strip()
+        if server_type == "live" and not password:
+            messagebox.showerror("Error", "Password is required for the live server.")
+            return
+
+        battle_format = self.challenge_format_var.get().strip()
+        n_challenges = self.challenge_n_var.get()
+
+        self._challenge_stop.clear()
+        self.btn_challenge.config(state="disabled")
+        self.btn_stop_challenge.config(state="normal")
+        self.challenge_status_var.set("Connecting...")
+
+        # Clear previous results
+        for item in self.challenge_tree.get_children():
+            self.challenge_tree.delete(item)
+
+        def challenge_thread():
+            try:
+                # Build server configuration
+                if server_type == "live":
+                    server_cfg = ShowdownServerConfiguration
+                else:
+                    port = self.challenge_local_port_var.get()
+                    server_cfg = ServerConfiguration(
+                        f"localhost:{port}",
+                        "localhost/action.php?",
+                    )
+
+                # Load team
+                team_str = load_team(team_path)
+
+                # Load checkpoint and create agent
+                config = Config(
+                    battle_format=battle_format,
+                    device="cpu",
+                )
+                state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                agent = PPOAgent(config, agent_id="challenger")
+                # Try agent1 key first, fall back to agent2
+                if "agent1" in state:
+                    agent.load_state_dict(state["agent1"])
+                elif "agent2" in state:
+                    agent.load_state_dict(state["agent2"])
+                else:
+                    raise ValueError("Checkpoint does not contain agent1 or agent2 keys.")
+                agent.set_eval()
+
+                acct = AccountConfiguration(username, password or None)
+
+                wins = 0
+                losses = 0
+
+                for i in range(n_challenges):
+                    if self._challenge_stop.is_set():
+                        break
+
+                    self.after(0, lambda idx=i+1: self.challenge_status_var.set(
+                        f"Battle {idx}/{n_challenges}..."
+                    ))
+
+                    async def run_challenge():
+                        player = RLPlayer(
+                            agent=agent,
+                            config=config,
+                            collect_data=False,
+                            deterministic=True,
+                            account_configuration=acct,
+                            battle_format=battle_format,
+                            team=ConstantTeambuilder(team_str),
+                            server_configuration=server_cfg,
+                            max_concurrent_battles=1,
+                        )
+                        await player.send_challenges(opponent, n_challenges=1)
+                        won = player.n_won_battles > 0
+                        return won
+
+                    try:
+                        won = run_async(run_challenge()).result(timeout=300)
+                        if won:
+                            wins += 1
+                            result_text = "Win"
+                        else:
+                            losses += 1
+                            result_text = "Loss"
+                    except Exception as e:
+                        losses += 1
+                        result_text = f"Error: {e}"
+
+                    self._log(f"Challenge {i+1}/{n_challenges}: {result_text}")
+                    self.after(0, lambda idx=i+1, r=result_text:
+                        self.challenge_tree.insert("", "end", values=(idx, r))
+                    )
+
+                self._log(f"Challenges complete: {wins}W / {losses}L")
+            except Exception as e:
+                self._log(f"Challenge error: {e}")
+            finally:
+                self.after(0, self._challenge_finished)
+
+        threading.Thread(target=challenge_thread, daemon=True).start()
+
+    def _on_stop_challenge(self):
+        self._log("Requesting challenge stop...")
+        self._challenge_stop.set()
+        self.challenge_status_var.set("Stopping...")
+
+    def _challenge_finished(self):
+        self.btn_challenge.config(state="normal")
+        self.btn_stop_challenge.config(state="disabled")
+        self.challenge_status_var.set("Idle")
 
     # ----- Cleanup ----------------------------------------------------------
 

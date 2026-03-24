@@ -212,8 +212,15 @@ class Trainer:
         for i in range(battles_played):
             p1_won = i < batch_wins  # approximate: first batch_wins were wins
 
-            p1_reward = 1.0 if p1_won else -1.0
-            p2_reward = -p1_reward
+            p1_base = 1.0 if p1_won else -1.0
+            p2_base = -p1_base
+
+            # Add KO differential bonus so even the losing side has
+            # variance in terminal reward (prevents gradient collapse
+            # in hopeless matchups).
+            ko_w = self.config.ko_reward_weight
+            p1_reward = p1_base + ko_w * player1.get_ko_differential()
+            p2_reward = p2_base + ko_w * player2.get_ko_differential()
 
             # Apply reward shaping
             self._apply_reward_shaping(player1, p1_reward)
@@ -260,10 +267,15 @@ class Trainer:
             steps_to_shape.append(i)
         steps_to_shape.reverse()
 
-        # Apply shaped rewards
+        # Apply shaped rewards with survival bonus so the losing side
+        # receives a small positive per-turn signal even when WP deltas
+        # are near zero (prevents gradient starvation in 100-0 matchups).
+        surv = self.config.survival_reward_per_turn
         for j, buf_idx in enumerate(steps_to_shape):
             if j < len(shaped_rewards):
-                buffer.steps[buf_idx].reward = shaped_rewards[j]
+                buffer.steps[buf_idx].reward = shaped_rewards[j] + surv
+            else:
+                buffer.steps[buf_idx].reward = surv
 
     def _update_agents(self):
         """Run PPO updates for both agents."""
