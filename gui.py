@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+"""PokeRL GUI — Manage training, evaluation, and Showdown server."""
+
+import asyncio
+import json
+import logging
+import os
+import platform
+import queue
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from dataclasses import dataclass
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+from typing import Dict, List, Optional, Tuple
+
+import torch
+
+from pokerl.agent import PPOAgent
+from pokerl.checkpoint import CheckpointManager
+from pokerl.config import Config
+from pokerl.env import create_player, load_team
+from pokerl.league import League
+from pokerl.trainer import Trainer
+from pokerl.win_probability import WinProbabilityEstimator
+
+logger = logging.getLogger("pokerl.gui")
+
+# ---------------------------------------------------------------------------
+# Async bridge — run coroutines from tkinter callbacks
+# ---------------------------------------------------------------------------
+
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_loop_thread: Optional[threading.Thread] = None
+
+
+def _ensure_event_loop():
+    global _loop, _loop_thread
+    if _loop is not None and _loop.is_running():
+        return
+    _loop = asyncio.new_event_loop()
+    _loop_thread = threading.Thread(target=_loop.run_forever, daemon=True)
+    _loop_thread.start()
+
+
+def run_async(coro):
+    """Schedule *coro* on the background event loop, return a Future."""
+    _ensure_event_loop()
+    return asyncio.run_coroutine_threadsafe(coro, _loop)
+
+
+# ---------------------------------------------------------------------------
+# Log handler that pushes records into a queue for the GUI
+# ---------------------------------------------------------------------------
+
+
+class QueueLogHandler(logging.Handler):
+    def __init__(self, log_queue: queue.Queue):
+        super().__init__()
+        self.log_queue = log_queue
+
+    def emit(self, record):
+        try:
+            self.log_queue.put_nowait(self.format(record))
+        except queue.Full:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
+
+PADDING = {"padx": 6, "pady": 3}
+
+
+class PokeRLApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("PokeRL \u2014 Pokemon Battle RL Trainer")
+        self.geometry("960x780")
+        self.minsize(800, 600)
+
+        # --- State ---
+        self._showdown_proc: Optional[subprocess.Popen] = None
+        self._trainer: Optional[Trainer] = None
+        self._training_future = None
+        self._training_stop = threading.Event()
+        self._eval_future = None
+        self.log_queue: queue.Queue = queue.Queue(maxsize=5000)
+
+        # Install queue log handler on root logger
+        qh = QueueLogHandler(self.log_queue)
+        qh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+        logging.getLogger().addHandler(qh)
+        logging.getLogger().setLevel(logging.INFO)
+
+        # Tkinter variables
+        self.team1_var = tk.StringVar(value="teams/team1.txt")
+        self.team2_var = tk.StringVar(value="teams/team2.txt")
+        self.checkpoint_var = tk.StringVar(value="")
+        self.output_var = tk.StringVar(value="checkpoints")
+        self.format_var = tk.StringVar(value="gen9nationaldexmonotype")
+        self.battles_var = tk.IntVar(value=100000)
+        self.lr_var = tk.DoubleVar(value=3e-4)
+        self.hidden_var = tk.IntVar(value=256)
+        self.device_var = tk.StringVar(value="cpu")
+        self.server_port_var = tk.IntVar(value=8000)
+        self.showdown_path_var = tk.StringVar(value="")
+        self.eval_n_battles_var = tk.IntVar(value=50)
+
+        self._build_ui()
+        self._poll_log_queue()
+
+    # ----- UI construction --------------------------------------------------
+
+    def _build_ui(self):
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # --- Tab 1: Training ---
+        train_frame = ttk.Frame(notebook)
+        notebook.add(train_frame, text="  Training  ")
+        self._build_training_tab(train_frame)
+
+        # --- Tab 2: Evaluation ---
+        eval_frame = ttk.Frame(notebook)
+        notebook.add(eval_frame, text="  Evaluation  ")
+        self._build_eval_tab(eval_frame)
+
+        # --- Tab 3: Server ---
+        server_frame = ttk.Frame(notebook)
+        notebook.add(server_frame, text="  Server  ")
+        self._build_server_tab(server_frame)
+
+        # --- Log area (always visible) ---
+        log_frame = ttk.LabelFrame(self, text="Log")
+        log_frame.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state="disabled", font=("Consolas", 9))
+        self.log_text.pack(fill="both", expand=True, padx=2, pady=2)
+
+    # -- Training tab --------------------------------------------------------
+
+    def _build_training_tab(self, parent):
+        # --- File selection ---
+        files = ttk.LabelFrame(parent, text="Files")
+        files.pack(fill="x", padx=6, pady=4)
+
+        self._file_row(files, "Team 1:", self.team1_var, 0)
+        self._file_row(files, "Team 2:", self.team2_var, 1)
+        self._file_row(files, "Resume from checkpoint:", self.checkpoint_var, 2, optional=True)
+        self._dir_row(files, "Output folder:", self.output_var, 3)
+
+        # --- Hyperparameters ---
+        hyper = ttk.LabelFrame(parent, text="Hyperparameters")
+        hyper.pack(fill="x", padx=6, pady=4)
+
+        row = 0
+        ttk.Label(hyper, text="Battle format:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(hyper, textvariable=self.format_var, width=30).grid(row=row, column=1, sticky="w", **PADDING)
+        ttk.Label(hyper, text="Device:").grid(row=row, column=2, sticky="e", **PADDING)
+        ttk.Combobox(hyper, textvariable=self.device_var, values=["cpu", "cuda"], width=8, state="readonly").grid(row=row, column=3, sticky="w", **PADDING)
+
+        row = 1
+        ttk.Label(hyper, text="Total battles:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(hyper, textvariable=self.battles_var, width=12).grid(row=row, column=1, sticky="w", **PADDING)
+        ttk.Label(hyper, text="Learning rate:").grid(row=row, column=2, sticky="e", **PADDING)
+        ttk.Entry(hyper, textvariable=self.lr_var, width=12).grid(row=row, column=3, sticky="w", **PADDING)
+
+        row = 2
+        ttk.Label(hyper, text="Hidden size:").grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(hyper, textvariable=self.hidden_var, width=12).grid(row=row, column=1, sticky="w", **PADDING)
+
+        # --- Controls ---
+        ctrl = ttk.Frame(parent)
+        ctrl.pack(fill="x", padx=6, pady=6)
+
+        self.btn_train = ttk.Button(ctrl, text="Start Training", command=self._on_start_training)
+        self.btn_train.pack(side="left", padx=4)
+        self.btn_stop_train = ttk.Button(ctrl, text="Stop Training", command=self._on_stop_training, state="disabled")
+        self.btn_stop_train.pack(side="left", padx=4)
+
+        self.train_status_var = tk.StringVar(value="Idle")
+        ttk.Label(ctrl, textvariable=self.train_status_var, foreground="gray").pack(side="left", padx=12)
+
+    # -- Evaluation tab ------------------------------------------------------
+
+    def _build_eval_tab(self, parent):
+        # --- Test group ---
+        tg = ttk.LabelFrame(parent, text="Test Group (models to evaluate)")
+        tg.pack(fill="both", expand=True, padx=6, pady=4)
+
+        btn_frame = ttk.Frame(tg)
+        btn_frame.pack(fill="x")
+        ttk.Button(btn_frame, text="Add checkpoint...", command=lambda: self._add_to_listbox(self.test_listbox)).pack(side="left", **PADDING)
+        ttk.Button(btn_frame, text="Remove selected", command=lambda: self._remove_from_listbox(self.test_listbox)).pack(side="left", **PADDING)
+
+        self.test_listbox = tk.Listbox(tg, height=5, selectmode="extended")
+        self.test_listbox.pack(fill="both", expand=True, padx=4, pady=2)
+
+        # --- Opponents ---
+        og = ttk.LabelFrame(parent, text="Opponents (evaluate against)")
+        og.pack(fill="both", expand=True, padx=6, pady=4)
+
+        btn_frame2 = ttk.Frame(og)
+        btn_frame2.pack(fill="x")
+        ttk.Button(btn_frame2, text="Add checkpoint...", command=lambda: self._add_to_listbox(self.opp_listbox)).pack(side="left", **PADDING)
+        ttk.Button(btn_frame2, text="Remove selected", command=lambda: self._remove_from_listbox(self.opp_listbox)).pack(side="left", **PADDING)
+
+        self.opp_listbox = tk.Listbox(og, height=5, selectmode="extended")
+        self.opp_listbox.pack(fill="both", expand=True, padx=4, pady=2)
+
+        # --- Eval settings ---
+        settings = ttk.Frame(parent)
+        settings.pack(fill="x", padx=6, pady=2)
+
+        ttk.Label(settings, text="Battles per matchup:").pack(side="left", **PADDING)
+        ttk.Entry(settings, textvariable=self.eval_n_battles_var, width=8).pack(side="left", **PADDING)
+        ttk.Label(settings, text="Team 1:").pack(side="left", padx=(16, 2))
+        ttk.Label(settings, textvariable=self.team1_var, foreground="gray").pack(side="left")
+        ttk.Label(settings, text="Team 2:").pack(side="left", padx=(16, 2))
+        ttk.Label(settings, textvariable=self.team2_var, foreground="gray").pack(side="left")
+
+        # --- Controls ---
+        ctrl = ttk.Frame(parent)
+        ctrl.pack(fill="x", padx=6, pady=6)
+
+        self.btn_eval = ttk.Button(ctrl, text="Run Evaluation", command=self._on_run_eval)
+        self.btn_eval.pack(side="left", padx=4)
+        self.btn_stop_eval = ttk.Button(ctrl, text="Stop Evaluation", command=self._on_stop_eval, state="disabled")
+        self.btn_stop_eval.pack(side="left", padx=4)
+
+        self.eval_status_var = tk.StringVar(value="Idle")
+        ttk.Label(ctrl, textvariable=self.eval_status_var, foreground="gray").pack(side="left", padx=12)
+
+        # --- Results table ---
+        res = ttk.LabelFrame(parent, text="Results")
+        res.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        cols = ("Test Model", "Opponent", "Wins", "Losses", "Win Rate")
+        self.results_tree = ttk.Treeview(res, columns=cols, show="headings", height=6)
+        for c in cols:
+            self.results_tree.heading(c, text=c)
+            self.results_tree.column(c, width=140, anchor="center")
+        self.results_tree.pack(fill="both", expand=True, padx=2, pady=2)
+
+    # -- Server tab ----------------------------------------------------------
+
+    def _build_server_tab(self, parent):
+        info = ttk.LabelFrame(parent, text="Pokemon Showdown Server")
+        info.pack(fill="x", padx=6, pady=6)
+
+        ttk.Label(info, text="Showdown directory:").grid(row=0, column=0, sticky="e", **PADDING)
+        ttk.Entry(info, textvariable=self.showdown_path_var, width=50).grid(row=0, column=1, sticky="ew", **PADDING)
+        ttk.Button(info, text="Browse...", command=self._browse_showdown_dir).grid(row=0, column=2, **PADDING)
+
+        ttk.Label(info, text="Port:").grid(row=1, column=0, sticky="e", **PADDING)
+        ttk.Entry(info, textvariable=self.server_port_var, width=8).grid(row=1, column=1, sticky="w", **PADDING)
+
+        info.columnconfigure(1, weight=1)
+
+        ctrl = ttk.Frame(parent)
+        ctrl.pack(fill="x", padx=6, pady=6)
+
+        self.btn_start_server = ttk.Button(ctrl, text="Start Server", command=self._on_start_server)
+        self.btn_start_server.pack(side="left", padx=4)
+        self.btn_stop_server = ttk.Button(ctrl, text="Stop Server", command=self._on_stop_server, state="disabled")
+        self.btn_stop_server.pack(side="left", padx=4)
+
+        self.server_status_var = tk.StringVar(value="Server: stopped")
+        ttk.Label(ctrl, textvariable=self.server_status_var, foreground="gray").pack(side="left", padx=12)
+
+    # ----- Helpers -----------------------------------------------------------
+
+    def _file_row(self, parent, label, var, row, optional=False):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", **PADDING)
+        e = ttk.Entry(parent, textvariable=var, width=55)
+        e.grid(row=row, column=1, sticky="ew", **PADDING)
+        ttk.Button(parent, text="Browse...", command=lambda: self._browse_file(var)).grid(row=row, column=2, **PADDING)
+        if optional:
+            ttk.Button(parent, text="Clear", command=lambda: var.set("")).grid(row=row, column=3, **PADDING)
+        parent.columnconfigure(1, weight=1)
+
+    def _dir_row(self, parent, label, var, row):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", **PADDING)
+        ttk.Entry(parent, textvariable=var, width=55).grid(row=row, column=1, sticky="ew", **PADDING)
+        ttk.Button(parent, text="Browse...", command=lambda: self._browse_dir(var)).grid(row=row, column=2, **PADDING)
+        parent.columnconfigure(1, weight=1)
+
+    def _browse_file(self, var):
+        path = filedialog.askopenfilename(
+            filetypes=[("Text files", "*.txt"), ("Checkpoint files", "*.pt"), ("All files", "*.*")]
+        )
+        if path:
+            var.set(path)
+
+    def _browse_dir(self, var):
+        path = filedialog.askdirectory()
+        if path:
+            var.set(path)
+
+    def _browse_showdown_dir(self):
+        path = filedialog.askdirectory(title="Select Pokemon Showdown directory")
+        if path:
+            self.showdown_path_var.set(path)
+
+    def _add_to_listbox(self, listbox: tk.Listbox):
+        paths = filedialog.askopenfilenames(
+            filetypes=[("Checkpoint files", "*.pt"), ("All files", "*.*")]
+        )
+        for p in paths:
+            if p and p not in listbox.get(0, "end"):
+                listbox.insert("end", p)
+
+    def _remove_from_listbox(self, listbox: tk.Listbox):
+        for idx in reversed(listbox.curselection()):
+            listbox.delete(idx)
+
+    def _log(self, msg: str):
+        logger.info(msg)
+
+    def _poll_log_queue(self):
+        """Drain the log queue into the ScrolledText widget."""
+        try:
+            while True:
+                msg = self.log_queue.get_nowait()
+                self.log_text.configure(state="normal")
+                self.log_text.insert("end", msg + "\n")
+                self.log_text.see("end")
+                self.log_text.configure(state="disabled")
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_log_queue)
+
+    def _make_config(self, **overrides) -> Config:
+        """Build a Config from current GUI state."""
+        kwargs = dict(
+            team1_path=self.team1_var.get(),
+            team2_path=self.team2_var.get(),
+            battle_format=self.format_var.get(),
+            total_battles=self.battles_var.get(),
+            lr=self.lr_var.get(),
+            hidden_size=self.hidden_var.get(),
+            device=self.device_var.get(),
+            checkpoint_dir=self.output_var.get(),
+            server_port=self.server_port_var.get(),
+        )
+        ckpt = self.checkpoint_var.get().strip()
+        if ckpt:
+            kwargs["resume"] = True
+            kwargs["resume_path"] = ckpt
+        kwargs.update(overrides)
+        return Config(**kwargs)
+
+    # ----- Server control ---------------------------------------------------
+
+    def _on_start_server(self):
+        sd_path = self.showdown_path_var.get().strip()
+        if not sd_path:
+            messagebox.showerror("Error", "Please select the Pokemon Showdown directory first.")
+            return
+
+        ps_main = Path(sd_path) / "pokemon-showdown"
+        if not ps_main.exists():
+            # Try the index.js fallback
+            ps_main = Path(sd_path) / "index.js"
+            if not ps_main.exists():
+                messagebox.showerror("Error", f"Cannot find pokemon-showdown executable in {sd_path}")
+                return
+
+        port = self.server_port_var.get()
+        node = shutil.which("node")
+        if not node:
+            messagebox.showerror("Error", "Node.js not found on PATH. Install Node.js first.")
+            return
+
+        try:
+            cmd = [node, str(ps_main), "start", "--no-security", f"--port={port}"]
+            self._showdown_proc = subprocess.Popen(
+                cmd,
+                cwd=sd_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            self._log(f"Starting Showdown server (PID {self._showdown_proc.pid}) on port {port}...")
+            self.server_status_var.set(f"Server: running (PID {self._showdown_proc.pid})")
+            self.btn_start_server.config(state="disabled")
+            self.btn_stop_server.config(state="normal")
+
+            # Stream server output in background
+            threading.Thread(target=self._stream_server_output, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to start server: {e}")
+
+    def _stream_server_output(self):
+        proc = self._showdown_proc
+        if proc and proc.stdout:
+            for line in proc.stdout:
+                self._log(f"[showdown] {line.rstrip()}")
+            proc.wait()
+            self._log(f"Showdown server exited (code {proc.returncode})")
+            self.after(0, self._server_stopped)
+
+    def _server_stopped(self):
+        self.server_status_var.set("Server: stopped")
+        self.btn_start_server.config(state="normal")
+        self.btn_stop_server.config(state="disabled")
+        self._showdown_proc = None
+
+    def _on_stop_server(self):
+        if self._showdown_proc:
+            self._log("Stopping Showdown server...")
+            self._showdown_proc.terminate()
+            threading.Thread(target=self._wait_kill_server, daemon=True).start()
+
+    def _wait_kill_server(self):
+        proc = self._showdown_proc
+        if proc:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    # ----- Training control -------------------------------------------------
+
+    def _on_start_training(self):
+        # Validate inputs
+        t1 = self.team1_var.get().strip()
+        t2 = self.team2_var.get().strip()
+        if not t1 or not os.path.isfile(t1):
+            messagebox.showerror("Error", f"Team 1 file not found: {t1}")
+            return
+        if not t2 or not os.path.isfile(t2):
+            messagebox.showerror("Error", f"Team 2 file not found: {t2}")
+            return
+
+        config = self._make_config()
+        self._training_stop.clear()
+        self.btn_train.config(state="disabled")
+        self.btn_stop_train.config(state="normal")
+        self.train_status_var.set("Training...")
+
+        self._log(f"Starting training: {config.total_battles} battles, format={config.battle_format}")
+
+        def train_thread():
+            try:
+                trainer = Trainer(config)
+                self._trainer = trainer
+
+                # Monkey-patch the trainer's train loop to check the stop flag
+                original_run_battle = trainer._run_battle
+
+                async def stoppable_run_battle():
+                    if self._training_stop.is_set():
+                        raise _TrainingStoppedError()
+                    return await original_run_battle()
+
+                trainer._run_battle = stoppable_run_battle
+
+                future = run_async(trainer.train())
+                future.result()  # blocks until done or error
+                self._log("Training finished.")
+            except _TrainingStoppedError:
+                self._log("Training stopped by user.")
+            except Exception as e:
+                self._log(f"Training error: {e}")
+            finally:
+                self._trainer = None
+                self.after(0, self._training_finished)
+
+        threading.Thread(target=train_thread, daemon=True).start()
+
+    def _on_stop_training(self):
+        self._log("Requesting training stop...")
+        self._training_stop.set()
+        self.train_status_var.set("Stopping...")
+
+    def _training_finished(self):
+        self.btn_train.config(state="normal")
+        self.btn_stop_train.config(state="disabled")
+        self.train_status_var.set("Idle")
+
+    # ----- Evaluation control -----------------------------------------------
+
+    def _on_run_eval(self):
+        test_models = list(self.test_listbox.get(0, "end"))
+        opp_models = list(self.opp_listbox.get(0, "end"))
+
+        if not test_models:
+            messagebox.showerror("Error", "Add at least one test model.")
+            return
+        if not opp_models:
+            messagebox.showerror("Error", "Add at least one opponent model.")
+            return
+
+        t1 = self.team1_var.get().strip()
+        t2 = self.team2_var.get().strip()
+        if not t1 or not os.path.isfile(t1):
+            messagebox.showerror("Error", f"Team 1 file not found: {t1}")
+            return
+        if not t2 or not os.path.isfile(t2):
+            messagebox.showerror("Error", f"Team 2 file not found: {t2}")
+            return
+
+        n_battles = self.eval_n_battles_var.get()
+        config = self._make_config()
+
+        self.btn_eval.config(state="disabled")
+        self.btn_stop_eval.config(state="normal")
+        self.eval_status_var.set("Running evaluation...")
+        self._training_stop.clear()
+
+        # Clear previous results
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+
+        def eval_thread():
+            try:
+                team1_str = load_team(t1)
+                team2_str = load_team(t2)
+
+                for t_path in test_models:
+                    if self._training_stop.is_set():
+                        break
+
+                    t_name = Path(t_path).stem
+                    t_state = torch.load(t_path, map_location="cpu", weights_only=False)
+
+                    for o_path in opp_models:
+                        if self._training_stop.is_set():
+                            break
+
+                        o_name = Path(o_path).stem
+                        o_state = torch.load(o_path, map_location="cpu", weights_only=False)
+
+                        self._log(f"Evaluating {t_name} vs {o_name} ({n_battles} battles)...")
+                        self.after(0, lambda: self.eval_status_var.set(f"{t_name} vs {o_name}..."))
+
+                        wins, losses = self._run_eval_matchup(
+                            config, team1_str, team2_str,
+                            t_state, o_state, n_battles
+                        )
+                        wr = wins / max(wins + losses, 1)
+                        self._log(f"  Result: {wins}W / {losses}L ({wr:.1%})")
+
+                        # Insert into treeview on main thread
+                        self.after(0, lambda tn=t_name, on=o_name, w=wins, l=losses, r=wr:
+                            self.results_tree.insert("", "end", values=(tn, on, w, l, f"{r:.1%}"))
+                        )
+
+                self._log("Evaluation complete.")
+            except Exception as e:
+                self._log(f"Evaluation error: {e}")
+            finally:
+                self.after(0, self._eval_finished)
+
+        threading.Thread(target=eval_thread, daemon=True).start()
+
+    def _run_eval_matchup(
+        self, config: Config, team1_str: str, team2_str: str,
+        test_state: dict, opp_state: dict, n_battles: int
+    ) -> Tuple[int, int]:
+        """Run n_battles between two checkpoint states. Returns (wins, losses)."""
+        total_wins = 0
+        total_losses = 0
+
+        for i in range(n_battles):
+            if self._training_stop.is_set():
+                break
+
+            test_agent = PPOAgent(config, agent_id="eval_test")
+            test_agent.load_state_dict(test_state["agent1"])
+            test_agent.set_eval()
+
+            opp_agent = PPOAgent(config, agent_id="eval_opp")
+            opp_agent.load_state_dict(opp_state["agent2"])
+            opp_agent.set_eval()
+
+            async def run_one():
+                p1 = create_player(
+                    agent=test_agent, config=config, team_str=team1_str,
+                    collect_data=False, deterministic=True,
+                )
+                p2 = create_player(
+                    agent=opp_agent, config=config, team_str=team2_str,
+                    collect_data=False, deterministic=True,
+                )
+                await p1.battle_against(p2, n_battles=1)
+                return p1.n_won_battles > 0
+
+            try:
+                won = run_async(run_one()).result(timeout=120)
+                if won:
+                    total_wins += 1
+                else:
+                    total_losses += 1
+            except Exception as e:
+                self._log(f"  Battle {i+1} error: {e}")
+                total_losses += 1
+
+        return total_wins, total_losses
+
+    def _on_stop_eval(self):
+        self._log("Requesting evaluation stop...")
+        self._training_stop.set()
+        self.eval_status_var.set("Stopping...")
+
+    def _eval_finished(self):
+        self.btn_eval.config(state="normal")
+        self.btn_stop_eval.config(state="disabled")
+        self.eval_status_var.set("Idle")
+
+    # ----- Cleanup ----------------------------------------------------------
+
+    def destroy(self):
+        if self._showdown_proc:
+            self._showdown_proc.terminate()
+            try:
+                self._showdown_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._showdown_proc.kill()
+        if _loop and _loop.is_running():
+            _loop.call_soon_threadsafe(_loop.stop)
+        super().destroy()
+
+
+class _TrainingStoppedError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    app = PokeRLApp()
+    app.protocol("WM_DELETE_WINDOW", app.destroy)
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
