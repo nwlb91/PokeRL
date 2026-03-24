@@ -913,8 +913,8 @@ class PokeRLApp(tk.Tk):
                 else:
                     port = self.challenge_local_port_var.get()
                     server_cfg = ServerConfiguration(
-                        f"localhost:{port}",
-                        "localhost/action.php?",
+                        f"ws://localhost:{port}/showdown/websocket",
+                        f"http://localhost:{port}/action.php?",
                     )
 
                 # Load team
