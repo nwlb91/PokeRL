@@ -1,0 +1,59 @@
+Clefable @ Leftovers
+Ability: Magic Guard
+Tera Type: Fairy
+EVs: 252 HP / 252 Def / 4 SpD
+Bold Nature
+- Moonblast
+- Soft-Boiled
+- Stealth Rock
+- Thunder Wave
+
+Primarina @ Choice Specs
+Ability: Liquid Voice
+Tera Type: Fairy
+EVs: 252 HP / 252 SpA / 4 SpD
+Modest Nature
+- Sparkling Aria
+- Moonblast
+- Psychic
+- Flip Turn
+
+Iron Valiant @ Booster Energy
+Ability: Quark Drive
+Tera Type: Fairy
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Moonblast
+- Aura Sphere
+- Thunderbolt
+- Psyshock
+
+Azumarill @ Sitrus Berry
+Ability: Huge Power
+Tera Type: Fairy
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Aqua Jet
+- Play Rough
+- Knock Off
+- Belly Drum
+
+Gardevoir @ Gardevoirite
+Ability: Trace
+Tera Type: Fairy
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Hyper Voice
+- Psyshock
+- Focus Blast
+- Mystical Fire
+
+Grimmsnarl @ Light Clay
+Ability: Prankster
+Tera Type: Fairy
+EVs: 252 HP / 4 Atk / 252 SpD
+Careful Nature
+- Spirit Break
+- Reflect
+- Light Screen
+- Thunder Wave
