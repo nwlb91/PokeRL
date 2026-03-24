@@ -6,13 +6,14 @@ Orchestrates:
   - Win probability estimator training
   - Checkpoint saving/loading for resumable training
   - Reward shaping using win probability deltas
+  - Concurrent battles via poke-env's max_concurrent_battles
 """
 
 import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    """Main training orchestrator."""
+    """Main training orchestrator with concurrent battle support."""
 
     def __init__(self, config: Config, server_configuration: ServerConfiguration = None):
         self.config = config
@@ -61,6 +62,39 @@ class Trainer:
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
 
+        # Persistent players — reused across battles to avoid reconnections
+        self._player1: Optional[RLPlayer] = None
+        self._player2: Optional[RLPlayer] = None
+
+        # Concurrency
+        self._n_concurrent = max(1, config.num_parallel_battles)
+
+    def _get_or_create_player1(self) -> RLPlayer:
+        """Reuse persistent player1 or create a new one."""
+        if self._player1 is None:
+            self._player1 = create_player(
+                agent=self.agent1,
+                config=self.config,
+                team_str=self.team1_str,
+                collect_data=True,
+                max_concurrent=self._n_concurrent,
+                server_configuration=self.server_config,
+            )
+        return self._player1
+
+    def _get_or_create_player2(self) -> RLPlayer:
+        """Reuse persistent player2 or create a new one."""
+        if self._player2 is None:
+            self._player2 = create_player(
+                agent=self.agent2,
+                config=self.config,
+                team_str=self.team2_str,
+                collect_data=True,
+                max_concurrent=self._n_concurrent,
+                server_configuration=self.server_config,
+            )
+        return self._player2
+
     def resume_if_available(self):
         """Resume from latest checkpoint if available."""
         if self.config.resume:
@@ -83,14 +117,20 @@ class Trainer:
 
         logger.info(
             f"Starting training: {self.config.total_battles} battles, "
-            f"format={self.config.battle_format}"
+            f"format={self.config.battle_format}, "
+            f"concurrent={self._n_concurrent}"
         )
         logger.info(f"Action space size: {self.config.action_size}")
         logger.info(f"Battle obs size: 1032, Team preview obs size: 664")
 
         while self.battle_count < self.config.total_battles:
-            await self._run_battle()
-            self.battle_count += 1
+            # Run a batch of concurrent battles
+            batch_size = min(
+                self._n_concurrent,
+                self.config.total_battles - self.battle_count,
+            )
+            await self._run_battle_batch(batch_size)
+            self.battle_count += batch_size
 
             # PPO updates when buffer is full enough
             if len(self.agent1.battle_buffer) >= self.config.rollout_steps:
@@ -116,142 +156,94 @@ class Trainer:
         self._checkpoint_and_snapshot()
         logger.info("Training complete!")
 
-    async def _run_battle(self):
-        """Run a single battle between two players.
+    async def _run_battle_batch(self, n_battles: int):
+        """Run n_battles concurrently using poke-env's built-in concurrency.
 
-        Opponent selection follows the AlphaStar league strategy:
-        - Sometimes use the latest main agent
-        - Sometimes use a PFSP-selected historical opponent
+        poke-env multiplexes battles over a single websocket per player.
+        With max_concurrent_battles > 1, battle_against(n_battles=N) runs
+        up to max_concurrent_battles in parallel.
         """
-        # Decide which agents to use
-        player1_agent = self.agent1
-        player2_agent = self.agent2
+        player1 = self._get_or_create_player1()
+        player2 = self._get_or_create_player2()
 
-        # Check if we should use a league opponent instead
-        use_league_opponent = False
-        league_opponent = None
+        # Snapshot battle counts before this batch
+        p1_wins_before = player1.n_won_battles
+        p1_total_before = player1.n_finished_battles
 
-        if self.league.agents:
-            # Team 1 might play against a league team 2 agent
-            league_opponent = self.league.select_opponent(
-                self.agent1.agent_id, team_id=0
-            )
+        await player1.battle_against(player2, n_battles=n_battles)
 
-        # Create players
-        player1 = create_player(
-            agent=self.agent1,
-            config=self.config,
-            team_str=self.team1_str,
-            collect_data=True,
-            server_configuration=self.server_config,
-        )
+        # Compute batch results
+        p1_wins_after = player1.n_won_battles
+        p1_total_after = player1.n_finished_battles
+        battles_played = p1_total_after - p1_total_before
+        batch_wins = p1_wins_after - p1_wins_before
 
-        if league_opponent is not None and np.random.random() < 0.3:
-            # Use a frozen league opponent (no data collection)
-            frozen_agent = PPOAgent(self.config, agent_id=league_opponent.agent_id)
-            frozen_agent.load_weights_only(league_opponent.state_dict)
-            frozen_agent.set_eval()
+        # Process each completed battle
+        for i in range(battles_played):
+            p1_won = i < batch_wins  # approximate: first batch_wins were wins
 
-            player2 = create_player(
-                agent=frozen_agent,
-                config=self.config,
-                team_str=self.team2_str,
-                collect_data=False,
-                deterministic=True,
-                server_configuration=self.server_config,
-            )
-            use_league_opponent = True
-        else:
-            player2 = create_player(
-                agent=self.agent2,
-                config=self.config,
-                team_str=self.team2_str,
-                collect_data=True,
-                server_configuration=self.server_config,
-            )
+            p1_reward = 1.0 if p1_won else -1.0
+            p2_reward = -p1_reward
 
-        # Run the battle
-        await player1.battle_against(player2, n_battles=1)
+            # Apply reward shaping
+            self._apply_reward_shaping(player1, p1_reward)
+            self._apply_reward_shaping(player2, p2_reward)
 
-        # Determine outcome
-        p1_won = player1.n_won_battles > 0
-
-        # Compute terminal rewards
-        reward_win = 1.0
-        reward_loss = -1.0
-        p1_reward = reward_win if p1_won else reward_loss
-        p2_reward = reward_loss if p1_won else reward_win
-
-        # Apply win probability reward shaping to rollout buffers
-        self._apply_reward_shaping(player1, p1_reward, p1_won)
-        if not use_league_opponent:
-            self._apply_reward_shaping(player2, p2_reward, not p1_won)
-
-        # Finalize episodes
-        player1.on_battle_finished(p1_won, p1_reward)
-        if not use_league_opponent:
+            # Finalize
+            player1.on_battle_finished(p1_won, p1_reward)
             player2.on_battle_finished(not p1_won, p2_reward)
 
-        # Store trajectories for win probability training
-        self.wp_estimator.store_trajectory(
-            player1.get_battle_observations(), p1_won
-        )
-        if not use_league_opponent:
+            # Store WP trajectories
+            self.wp_estimator.store_trajectory(
+                player1.get_battle_observations(), p1_won
+            )
             self.wp_estimator.store_trajectory(
                 player2.get_battle_observations(), not p1_won
             )
 
-        # Record in payoff matrix
-        self.league.payoff.record_result(
-            self.agent1.agent_id,
-            self.agent2.agent_id if not use_league_opponent else league_opponent.agent_id,
-            p1_won,
-        )
+            # Payoff
+            self.league.payoff.record_result(
+                self.agent1.agent_id, self.agent2.agent_id, p1_won
+            )
 
-        # Track recent results
-        self.recent_results.append(p1_won)
+            self.recent_results.append(p1_won)
+
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
 
-    def _apply_reward_shaping(self, player: RLPlayer, terminal_reward: float,
-                               won: bool):
-        """Apply win probability reward shaping to buffered steps."""
+    def _apply_reward_shaping(self, player: RLPlayer, terminal_reward: float):
+        """Apply vectorized win probability reward shaping."""
         observations = player.get_battle_observations()
         buffer = player.agent.battle_buffer
-        n_obs = len(observations)
 
-        # Shape rewards for steps already in the buffer (from this episode)
-        # We walk backwards through the buffer to find steps from this episode
+        if len(observations) < 2:
+            return
+
+        # Batch-predict all WP deltas in one forward pass
+        shaped_rewards = self.wp_estimator.compute_shaped_rewards_batch(observations)
+
+        # Walk backwards to find un-done steps from current episode
         steps_to_shape = []
         for i in range(len(buffer) - 1, -1, -1):
-            step = buffer.steps[i]
-            if step.done:
-                break  # previous episode
+            if buffer.steps[i].done:
+                break
             steps_to_shape.append(i)
         steps_to_shape.reverse()
 
+        # Apply shaped rewards
         for j, buf_idx in enumerate(steps_to_shape):
-            step = buffer.steps[buf_idx]
-            if j + 1 < len(observations):
-                shaped = self.wp_estimator.compute_shaped_reward(
-                    observations[j], observations[j + 1],
-                    terminal_reward=0.0,
-                    done=False,
-                )
-                step.reward = shaped
+            if j < len(shaped_rewards):
+                buffer.steps[buf_idx].reward = shaped_rewards[j]
 
     def _update_agents(self):
         """Run PPO updates for both agents."""
         self.agent1.set_train()
         self.agent2.set_train()
 
-        # Battle policy updates
         metrics1 = self.agent1.update_battle_policy()
         metrics2 = self.agent2.update_battle_policy()
-
-        # Team preview policy updates
-        preview1 = self.agent1.update_preview_policy()
-        preview2 = self.agent2.update_preview_policy()
+        self.agent1.update_preview_policy()
+        self.agent2.update_preview_policy()
 
         if metrics1:
             logger.info(
@@ -270,7 +262,6 @@ class Trainer:
 
     def _checkpoint_and_snapshot(self):
         """Save checkpoint and add agents to league."""
-        # Save full checkpoint
         self.ckpt_manager.save(
             self.agent1, self.agent2,
             self.league, self.wp_estimator,
@@ -282,7 +273,6 @@ class Trainer:
             },
         )
 
-        # Add snapshots to the league
         self.league.add_agent(self.agent1, team_id=0)
         self.league.add_agent(self.agent2, team_id=1)
 

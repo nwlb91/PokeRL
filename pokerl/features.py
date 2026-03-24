@@ -33,233 +33,124 @@ NUM_SIDE_CONDITIONS = 24
 STAT_NAMES = ["hp", "atk", "def", "spa", "spd", "spe"]
 BOOST_STATS = ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"]
 
+# Precompute enum-to-index mappings at module load (avoid repeated list scans)
+_STATUS_INDEX = {s: i for i, s in enumerate(Status)}
+_WEATHER_INDEX = {w: i for i, w in enumerate(Weather)}
+_FIELD_INDEX = {f: i for i, f in enumerate(Field)}
+_SIDE_COND_INDEX = {sc: i for i, sc in enumerate(SideCondition)}
+_CATEGORY_INDEX = {
+    MoveCategory.PHYSICAL: 0,
+    MoveCategory.SPECIAL: 1,
+    MoveCategory.STATUS: 2,
+}
 
-def _encode_type(ptype: Optional[PokemonType]) -> np.ndarray:
-    """One-hot encode a PokemonType (20 dims)."""
-    vec = np.zeros(NUM_TYPES, dtype=np.float32)
+# Pre-allocate reusable zero arrays (templates)
+_ZEROS_69 = np.zeros(69, dtype=np.float32)
+_ZEROS_37 = np.zeros(37, dtype=np.float32)
+
+
+def _encode_type_into(buf: np.ndarray, offset: int, ptype: Optional[PokemonType]):
+    """Write one-hot PokemonType into buf at offset (20 dims). No allocation."""
     if ptype is not None:
-        vec[ptype.value - 1] = 1.0
-    return vec
+        buf[offset + ptype.value - 1] = 1.0
 
 
-def _encode_status(status: Optional[Status]) -> np.ndarray:
-    """One-hot encode a Status (7 dims)."""
-    vec = np.zeros(NUM_STATUSES, dtype=np.float32)
+def _encode_status_into(buf: np.ndarray, offset: int, status: Optional[Status]):
+    """Write one-hot Status into buf at offset (7 dims). No allocation."""
     if status is not None:
-        idx = list(Status).index(status)
-        vec[idx] = 1.0
-    return vec
+        buf[offset + _STATUS_INDEX[status]] = 1.0
 
 
-def _encode_boosts(boosts: Dict[str, int]) -> np.ndarray:
-    """Encode stat boosts normalized to [-1, 1] (7 dims)."""
-    return np.array(
-        [boosts.get(s, 0) / 6.0 for s in BOOST_STATS], dtype=np.float32
-    )
-
-
-def _encode_pokemon_base(mon: Optional[Pokemon], known: bool = True) -> np.ndarray:
-    """Encode core Pokemon features (69 dims).
-
-    - HP fraction: 1
-    - Types (2 * 20): 40
-    - Status: 7
-    - Boosts: 7
-    - Base stats normalized: 6
-    - Level normalized: 1
-    - Is dynamaxed: 1
-    - Is terastallized: 1
-    - Tera type: 20 (if known) -- but we encode it always, zeros if unknown
-    - Fainted: 1
-    - Active: 1
-    - Must recharge: 1
-    - Preparing move: 1
-    - Protect counter (normalized): 1
-    Total: 1 + 40 + 7 + 7 + 6 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 = 69
-    (We skip tera_type encoding here to keep it simpler - 69 dims)
-    """
+def _encode_pokemon_base_into(buf: np.ndarray, offset: int, mon: Optional[Pokemon]):
+    """Encode core Pokemon features (69 dims) directly into buf at offset."""
     if mon is None:
-        return np.zeros(69, dtype=np.float32)
+        return
 
-    features = []
-
-    # HP fraction
-    features.append(mon.current_hp_fraction)
-
-    # Types
-    features.extend(_encode_type(mon.type_1))
-    features.extend(_encode_type(mon.type_2))
-
-    # Status
-    features.extend(_encode_status(mon.status))
-
-    # Boosts
-    features.extend(_encode_boosts(mon.boosts))
-
-    # Base stats (normalized by 255, max possible base stat)
-    for stat in STAT_NAMES:
-        features.append(mon.base_stats.get(stat, 0) / 255.0)
-
-    # Level
-    features.append(mon.level / 100.0)
-
-    # Flags
-    features.append(float(mon.is_dynamaxed))
-    features.append(float(mon.is_terastallized))
-    features.append(float(mon.fainted))
-    features.append(float(mon.active))
-    features.append(float(mon.must_recharge))
-    features.append(float(mon.preparing))
-    features.append(min(mon.protect_counter, 6) / 6.0)
-
-    return np.array(features, dtype=np.float32)
+    o = offset
+    buf[o] = mon.current_hp_fraction
+    o += 1
+    _encode_type_into(buf, o, mon.type_1)
+    o += NUM_TYPES
+    _encode_type_into(buf, o, mon.type_2)
+    o += NUM_TYPES
+    _encode_status_into(buf, o, mon.status)
+    o += NUM_STATUSES
+    boosts = mon.boosts
+    for s in BOOST_STATS:
+        buf[o] = boosts.get(s, 0) / 6.0
+        o += 1
+    base = mon.base_stats
+    for s in STAT_NAMES:
+        buf[o] = base.get(s, 0) / 255.0
+        o += 1
+    buf[o] = mon.level / 100.0; o += 1
+    buf[o] = float(mon.is_dynamaxed); o += 1
+    buf[o] = float(mon.is_terastallized); o += 1
+    buf[o] = float(mon.fainted); o += 1
+    buf[o] = float(mon.active); o += 1
+    buf[o] = float(mon.must_recharge); o += 1
+    buf[o] = float(mon.preparing); o += 1
+    buf[o] = min(mon.protect_counter, 6) / 6.0
 
 
-def _encode_move(move: Optional[Move], pokemon: Optional[Pokemon] = None) -> np.ndarray:
-    """Encode a single move (37 dims).
-
-    - Base power / 250: 1
-    - Type: 20
-    - Category (3-dim one-hot): 3
-    - Accuracy: 1
-    - Priority / 7: 1
-    - PP fraction: 1
-    - Is status move: 1
-    - Has STAB: 1
-    - Drain fraction: 1
-    - Recoil fraction: 1
-    - Heal fraction: 1
-    - Expected hits / 5: 1
-    - Force switch: 1
-    - Is Z move: 1
-    - Crit ratio / 6: 1
-    - Has self boost: 1
-    - Has target boost: 1
-    Total: 37
-    """
+def _encode_move_into(buf: np.ndarray, offset: int,
+                      move: Optional[Move], pokemon: Optional[Pokemon] = None):
+    """Encode a single move (37 dims) directly into buf at offset."""
     if move is None:
-        return np.zeros(37, dtype=np.float32)
+        return
 
-    features = []
-
-    # Base power
+    o = offset
     bp = move.base_power if isinstance(move.base_power, (int, float)) else 0
-    features.append(bp / 250.0)
+    buf[o] = bp / 250.0; o += 1
 
-    # Type
-    features.extend(_encode_type(move.type))
+    _encode_type_into(buf, o, move.type)
+    o += NUM_TYPES
 
-    # Category
-    cat = np.zeros(3, dtype=np.float32)
-    if move.category == MoveCategory.PHYSICAL:
-        cat[0] = 1.0
-    elif move.category == MoveCategory.SPECIAL:
-        cat[1] = 1.0
-    elif move.category == MoveCategory.STATUS:
-        cat[2] = 1.0
-    features.extend(cat)
+    cat_idx = _CATEGORY_INDEX.get(move.category)
+    if cat_idx is not None:
+        buf[o + cat_idx] = 1.0
+    o += 3
 
-    # Accuracy
-    features.append(move.accuracy if move.accuracy else 1.0)
+    buf[o] = move.accuracy if move.accuracy else 1.0; o += 1
+    buf[o] = move.priority / 7.0; o += 1
+    buf[o] = (move.current_pp / move.max_pp) if move.max_pp > 0 else 0.0; o += 1
+    buf[o] = float(move.category == MoveCategory.STATUS); o += 1
 
-    # Priority
-    features.append(move.priority / 7.0)
-
-    # PP fraction
-    if move.max_pp > 0:
-        features.append(move.current_pp / move.max_pp)
-    else:
-        features.append(0.0)
-
-    # Flags
-    features.append(float(move.category == MoveCategory.STATUS))
-
-    # STAB check
     has_stab = False
     if pokemon is not None and move.type is not None:
         has_stab = move.type in pokemon.types
-    features.append(float(has_stab))
+    buf[o] = float(has_stab); o += 1
 
-    # Drain / Recoil / Heal
-    features.append(move.drain)
-    features.append(move.recoil)
-    features.append(move.heal)
+    buf[o] = move.drain; o += 1
+    buf[o] = move.recoil; o += 1
+    buf[o] = move.heal; o += 1
+    buf[o] = move.expected_hits / 5.0; o += 1
+    buf[o] = float(move.force_switch); o += 1
+    buf[o] = float(move.is_z); o += 1
+    buf[o] = move.crit_ratio / 6.0; o += 1
 
-    # Expected hits
-    features.append(move.expected_hits / 5.0)
-
-    # Force switch
-    features.append(float(move.force_switch))
-
-    # Is Z
-    features.append(float(move.is_z))
-
-    # Crit ratio
-    features.append(move.crit_ratio / 6.0)
-
-    # Boost info
-    features.append(float(move.self_boost is not None and any(v != 0 for v in (move.self_boost or {}).values())))
-    features.append(float(move.boosts is not None and any(v != 0 for v in (move.boosts or {}).values())))
-
-    return np.array(features, dtype=np.float32)
+    buf[o] = float(move.self_boost is not None and any(v != 0 for v in (move.self_boost or {}).values()))
+    o += 1
+    buf[o] = float(move.boosts is not None and any(v != 0 for v in (move.boosts or {}).values()))
 
 
-def _encode_weather(weather: Dict[Weather, int]) -> np.ndarray:
-    """One-hot weather encoding (9 dims)."""
-    vec = np.zeros(NUM_WEATHERS, dtype=np.float32)
-    for w in weather:
-        idx = list(Weather).index(w)
-        vec[idx] = 1.0
-    return vec
-
-
-def _encode_fields(fields: Dict[Field, int]) -> np.ndarray:
-    """One-hot field encoding (15 dims)."""
-    vec = np.zeros(NUM_FIELDS, dtype=np.float32)
-    for f in fields:
-        idx = list(Field).index(f)
-        vec[idx] = 1.0
-    return vec
-
-
-def _encode_side_conditions(conditions: Dict[SideCondition, int]) -> np.ndarray:
-    """Encode side conditions with layer counts where applicable (24 dims)."""
-    vec = np.zeros(NUM_SIDE_CONDITIONS, dtype=np.float32)
-    for sc, val in conditions.items():
-        idx = list(SideCondition).index(sc)
-        # Spikes: up to 3 layers, Toxic Spikes: up to 2 layers
-        if sc == SideCondition.SPIKES:
-            vec[idx] = min(val, 3) / 3.0
-        elif sc == SideCondition.TOXIC_SPIKES:
-            vec[idx] = min(val, 2) / 2.0
-        else:
-            vec[idx] = 1.0
-    return vec
-
-
-def _encode_team_pokemon(team: Dict[str, Pokemon], max_size: int = 6) -> np.ndarray:
-    """Encode up to max_size Pokemon from a team (bench info).
-
-    Per Pokemon: HP fraction (1) + types (40) + status (7) + base stats (6) +
-                 fainted (1) = 55 dims
-    Total: 55 * max_size = 330 dims
-    """
+def _encode_team_pokemon_into(buf: np.ndarray, offset: int,
+                               team: Dict[str, Pokemon], max_size: int = 6):
+    """Encode up to max_size Pokemon (55 dims each) into buf at offset."""
     per_mon = 55
-    result = np.zeros(per_mon * max_size, dtype=np.float32)
-
     for i, mon in enumerate(team.values()):
         if i >= max_size:
             break
-        offset = i * per_mon
-        result[offset] = mon.current_hp_fraction
-        result[offset + 1: offset + 21] = _encode_type(mon.type_1)
-        result[offset + 21: offset + 41] = _encode_type(mon.type_2)
-        result[offset + 41: offset + 48] = _encode_status(mon.status)
-        for j, stat in enumerate(STAT_NAMES):
-            result[offset + 48 + j] = mon.base_stats.get(stat, 0) / 255.0
-        result[offset + 54] = float(mon.fainted)
-
-    return result
+        o = offset + i * per_mon
+        buf[o] = mon.current_hp_fraction; o += 1
+        _encode_type_into(buf, o, mon.type_1); o += NUM_TYPES
+        _encode_type_into(buf, o, mon.type_2); o += NUM_TYPES
+        _encode_status_into(buf, o, mon.status); o += NUM_STATUSES
+        base = mon.base_stats
+        for s in STAT_NAMES:
+            buf[o] = base.get(s, 0) / 255.0
+            o += 1
+        buf[o] = float(mon.fainted)
 
 
 def embed_battle(battle: Battle) -> np.ndarray:
@@ -281,63 +172,86 @@ def embed_battle(battle: Battle) -> np.ndarray:
     Returns:
         np.ndarray of shape (1032,)
     """
-    features = []
+    buf = np.zeros(BATTLE_OBS_SIZE, dtype=np.float32)
+    o = 0
 
-    # --- Active Pokemon ---
+    # Active Pokemon (69)
     active = battle.active_pokemon
-    features.append(_encode_pokemon_base(active))
+    _encode_pokemon_base_into(buf, o, active)
+    o += 69
 
-    # --- Active Pokemon's 4 moves ---
+    # Active Pokemon moves (4 * 37 = 148)
     if active is not None:
         moves = list(active.moves.values())
     else:
         moves = []
     for i in range(4):
         move = moves[i] if i < len(moves) else None
-        features.append(_encode_move(move, active))
+        _encode_move_into(buf, o, move, active)
+        o += 37
 
-    # --- Full team (bench info, all 6 slots) ---
-    features.append(_encode_team_pokemon(battle.team))
+    # Full team bench (6 * 55 = 330)
+    _encode_team_pokemon_into(buf, o, battle.team)
+    o += 330
 
-    # --- Opponent active Pokemon ---
-    opp_active = battle.opponent_active_pokemon
-    features.append(_encode_pokemon_base(opp_active, known=False))
+    # Opponent active (69)
+    _encode_pokemon_base_into(buf, o, battle.opponent_active_pokemon)
+    o += 69
 
-    # --- Opponent team (known info) ---
-    features.append(_encode_team_pokemon(battle.opponent_team))
+    # Opponent team (6 * 55 = 330)
+    _encode_team_pokemon_into(buf, o, battle.opponent_team)
+    o += 330
 
-    # --- Weather ---
-    features.append(_encode_weather(battle.weather))
+    # Weather (9)
+    for w in battle.weather:
+        buf[o + _WEATHER_INDEX[w]] = 1.0
+    o += NUM_WEATHERS
 
-    # --- Fields / Terrain ---
-    features.append(_encode_fields(battle.fields))
+    # Fields (15)
+    for f in battle.fields:
+        buf[o + _FIELD_INDEX[f]] = 1.0
+    o += NUM_FIELDS
 
-    # --- Side conditions (ours) ---
-    features.append(_encode_side_conditions(battle.side_conditions))
+    # Side conditions — ours (24)
+    for sc, val in battle.side_conditions.items():
+        idx = _SIDE_COND_INDEX[sc]
+        if sc == SideCondition.SPIKES:
+            buf[o + idx] = min(val, 3) / 3.0
+        elif sc == SideCondition.TOXIC_SPIKES:
+            buf[o + idx] = min(val, 2) / 2.0
+        else:
+            buf[o + idx] = 1.0
+    o += NUM_SIDE_CONDITIONS
 
-    # --- Side conditions (opponent) ---
-    features.append(_encode_side_conditions(battle.opponent_side_conditions))
+    # Side conditions — opponent (24)
+    for sc, val in battle.opponent_side_conditions.items():
+        idx = _SIDE_COND_INDEX[sc]
+        if sc == SideCondition.SPIKES:
+            buf[o + idx] = min(val, 3) / 3.0
+        elif sc == SideCondition.TOXIC_SPIKES:
+            buf[o + idx] = min(val, 2) / 2.0
+        else:
+            buf[o + idx] = 1.0
+    o += NUM_SIDE_CONDITIONS
 
-    # --- Battle flags (14 dims) ---
-    flags = np.zeros(14, dtype=np.float32)
-    flags[0] = float(battle.can_mega_evolve)
-    flags[1] = float(battle.can_z_move)
-    flags[2] = float(battle.can_dynamax)
-    flags[3] = float(battle.can_tera)
-    flags[4] = float(battle.force_switch)
-    flags[5] = float(battle.trapped)
-    flags[6] = float(battle.maybe_trapped)
-    flags[7] = battle.turn / 100.0  # normalize turn count
-    flags[8] = float(battle.teampreview)
-    flags[9] = float(battle.used_dynamax)
-    flags[10] = float(battle.used_mega_evolve)
-    flags[11] = float(battle.used_z_move)
-    flags[12] = float(battle.used_tera)
+    # Battle flags (14)
+    buf[o] = float(battle.can_mega_evolve)
+    buf[o+1] = float(battle.can_z_move)
+    buf[o+2] = float(battle.can_dynamax)
+    buf[o+3] = float(battle.can_tera)
+    buf[o+4] = float(battle.force_switch)
+    buf[o+5] = float(battle.trapped)
+    buf[o+6] = float(battle.maybe_trapped)
+    buf[o+7] = battle.turn / 100.0
+    buf[o+8] = float(battle.teampreview)
+    buf[o+9] = float(battle.used_dynamax)
+    buf[o+10] = float(battle.used_mega_evolve)
+    buf[o+11] = float(battle.used_z_move)
+    buf[o+12] = float(battle.used_tera)
     if battle.dynamax_turns_left is not None:
-        flags[13] = battle.dynamax_turns_left / 3.0
-    features.append(flags)
+        buf[o+13] = battle.dynamax_turns_left / 3.0
 
-    return np.concatenate(features)
+    return buf
 
 
 def embed_team_preview(battle: Battle) -> np.ndarray:
@@ -352,20 +266,11 @@ def embed_team_preview(battle: Battle) -> np.ndarray:
     Returns:
         np.ndarray of shape (664,)
     """
-    features = []
-
-    # Our team
-    features.append(_encode_team_pokemon(battle.team))
-
-    # Opponent team (what we can see in preview)
-    features.append(_encode_team_pokemon(battle.opponent_team))
-
-    # Format info
-    fmt = np.zeros(4, dtype=np.float32)
-    fmt[0] = battle.gen / 9.0
-    features.append(fmt)
-
-    return np.concatenate(features)
+    buf = np.zeros(TEAM_PREVIEW_OBS_SIZE, dtype=np.float32)
+    _encode_team_pokemon_into(buf, 0, battle.team)
+    _encode_team_pokemon_into(buf, 330, battle.opponent_team)
+    buf[660] = battle.gen / 9.0
+    return buf
 
 
 # Precompute sizes

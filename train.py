@@ -50,6 +50,8 @@ def parse_args():
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--rollout-steps", type=int, default=256)
+    parser.add_argument("--num-parallel-battles", type=int, default=4,
+                        help="Concurrent battles via poke-env (default: 4)")
 
     # PPO
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -113,6 +115,7 @@ def main():
         entropy_coef=args.entropy_coef,
         batch_size=args.batch_size,
         rollout_steps=args.rollout_steps,
+        num_parallel_battles=args.num_parallel_battles,
         ppo_epochs=args.ppo_epochs,
         wp_reward_weight=args.wp_reward_weight,
         league_size=args.league_size,

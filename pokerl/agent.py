@@ -71,25 +71,19 @@ class RolloutBuffer:
 
         return returns, advantages
 
-    def get_batches(self, batch_size: int, returns: np.ndarray,
-                    advantages: np.ndarray):
-        """Yield mini-batches for PPO update."""
+    def to_tensors(self, device: torch.device):
+        """Pre-stack all data into tensors once (avoid repeated conversions)."""
         n = len(self.steps)
-        indices = np.random.permutation(n)
-
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            batch_idx = indices[start:end]
-
-            obs = np.array([self.steps[i].obs for i in batch_idx])
-            actions = np.array([self.steps[i].action for i in batch_idx])
-            masks = np.array([self.steps[i].action_mask for i in batch_idx])
-            old_log_probs = np.array([self.steps[i].log_prob for i in batch_idx])
-            batch_returns = returns[batch_idx]
-            batch_advantages = advantages[batch_idx]
-
-            yield (obs, actions, masks, old_log_probs,
-                   batch_returns, batch_advantages)
+        obs = np.array([self.steps[i].obs for i in range(n)])
+        actions = np.array([self.steps[i].action for i in range(n)], dtype=np.int64)
+        masks = np.array([self.steps[i].action_mask for i in range(n)])
+        log_probs = np.array([self.steps[i].log_prob for i in range(n)], dtype=np.float32)
+        return (
+            torch.from_numpy(obs).to(device),
+            torch.from_numpy(actions).to(device),
+            torch.from_numpy(masks).to(device),
+            torch.from_numpy(log_probs).to(device),
+        )
 
 
 class PPOAgent:
@@ -114,6 +108,14 @@ class PPOAgent:
             hidden_size=config.hidden_size // 2,
             num_leads=config.team_preview_action_size,
         ).to(self.device)
+
+        # Try torch.compile for PyTorch 2.0+
+        if hasattr(torch, "compile") and config.device != "cpu":
+            try:
+                self.battle_net = torch.compile(self.battle_net)
+                self.preview_net = torch.compile(self.preview_net)
+            except Exception:
+                pass  # graceful fallback
 
         # Optimizers
         self.battle_optimizer = optim.Adam(
@@ -142,19 +144,17 @@ class PPOAgent:
             (action, log_prob, value)
         """
         with torch.no_grad():
-            obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-            mask_t = torch.FloatTensor(action_mask).unsqueeze(0).to(self.device)
+            obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
+            mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
 
             logits, value = self.battle_net(obs_t, mask_t)
 
+            dist = torch.distributions.Categorical(logits=logits)
             if deterministic:
                 action = logits.argmax(dim=-1)
-                dist = torch.distributions.Categorical(logits=logits)
-                log_prob = dist.log_prob(action)
             else:
-                dist = torch.distributions.Categorical(logits=logits)
                 action = dist.sample()
-                log_prob = dist.log_prob(action)
+            log_prob = dist.log_prob(action)
 
         return (action.item(), log_prob.item(), value.squeeze().item())
 
@@ -167,19 +167,17 @@ class PPOAgent:
             (action, log_prob, value)
         """
         with torch.no_grad():
-            obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-            mask_t = torch.FloatTensor(mask).unsqueeze(0).to(self.device)
+            obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
+            mask_t = torch.from_numpy(mask).unsqueeze(0).to(self.device)
 
             logits, value = self.preview_net(obs_t, mask_t)
 
+            dist = torch.distributions.Categorical(logits=logits)
             if deterministic:
                 action = logits.argmax(dim=-1)
-                dist = torch.distributions.Categorical(logits=logits)
-                log_prob = dist.log_prob(action)
             else:
-                dist = torch.distributions.Categorical(logits=logits)
                 action = dist.sample()
-                log_prob = dist.log_prob(action)
+            log_prob = dist.log_prob(action)
 
         return (action.item(), log_prob.item(), value.squeeze().item())
 
@@ -203,6 +201,7 @@ class PPOAgent:
             return {}
 
         cfg = self.config
+        n = len(buffer)
 
         # Compute returns and advantages
         returns, advantages = buffer.compute_returns_and_advantages(
@@ -210,8 +209,13 @@ class PPOAgent:
         )
 
         # Normalize advantages
-        if len(advantages) > 1:
+        if n > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Pre-convert ALL data to GPU tensors once
+        all_obs, all_actions, all_masks, all_old_lp = buffer.to_tensors(self.device)
+        all_returns = torch.from_numpy(returns).to(self.device)
+        all_advantages = torch.from_numpy(advantages).to(self.device)
 
         total_policy_loss = 0.0
         total_value_loss = 0.0
@@ -219,16 +223,19 @@ class PPOAgent:
         num_batches = 0
 
         for epoch in range(cfg.ppo_epochs):
-            for batch in buffer.get_batches(cfg.batch_size, returns, advantages):
-                (obs, actions, masks, old_log_probs,
-                 batch_returns, batch_advantages) = batch
+            indices = torch.randperm(n, device=self.device)
 
-                obs_t = torch.FloatTensor(obs).to(self.device)
-                actions_t = torch.LongTensor(actions).to(self.device)
-                masks_t = torch.FloatTensor(masks).to(self.device)
-                old_lp_t = torch.FloatTensor(old_log_probs).to(self.device)
-                returns_t = torch.FloatTensor(batch_returns).to(self.device)
-                adv_t = torch.FloatTensor(batch_advantages).to(self.device)
+            for start in range(0, n, cfg.batch_size):
+                end = min(start + cfg.batch_size, n)
+                idx = indices[start:end]
+
+                # Slice pre-converted tensors (no CPU→GPU transfer)
+                obs_t = all_obs[idx]
+                actions_t = all_actions[idx]
+                masks_t = all_masks[idx]
+                old_lp_t = all_old_lp[idx]
+                returns_t = all_returns[idx]
+                adv_t = all_advantages[idx]
 
                 _, new_lp, entropy, values = network.get_action_and_value(
                     obs_t, masks_t, actions_t
@@ -251,7 +258,7 @@ class PPOAgent:
                         + cfg.value_coef * value_loss
                         + cfg.entropy_coef * entropy_loss)
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(network.parameters(), cfg.max_grad_norm)
                 optimizer.step()

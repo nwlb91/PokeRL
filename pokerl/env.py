@@ -203,6 +203,7 @@ def create_player(
     username: str = None,
     collect_data: bool = True,
     deterministic: bool = False,
+    max_concurrent: int = 1,
     server_configuration: ServerConfiguration = None,
 ) -> RLPlayer:
     """Create an RLPlayer with the given configuration."""
@@ -220,6 +221,6 @@ def create_player(
         battle_format=config.battle_format,
         team=ConstantTeambuilder(team_str),
         server_configuration=server_configuration,
-        max_concurrent_battles=1,
+        max_concurrent_battles=max_concurrent,
     )
     return player
