@@ -835,11 +835,11 @@ class PokeRLApp(tk.Tk):
             async def run_one():
                 p1 = create_player(
                     agent=test_agent, config=config, team_str=team1_str,
-                    collect_data=False, deterministic=True,
+                    collect_data=False, deterministic=False,
                 )
                 p2 = create_player(
                     agent=opp_agent, config=config, team_str=team2_str,
-                    collect_data=False, deterministic=True,
+                    collect_data=False, deterministic=False,
                 )
                 await p1.battle_against(p2, n_battles=1)
                 return p1.n_won_battles > 0
@@ -954,7 +954,7 @@ class PokeRLApp(tk.Tk):
                             agent=agent,
                             config=config,
                             collect_data=False,
-                            deterministic=True,
+                            deterministic=False,
                             account_configuration=acct,
                             battle_format=battle_format,
                             team=ConstantTeambuilder(team_str),
