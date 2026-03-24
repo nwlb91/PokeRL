@@ -35,9 +35,10 @@ logger = logging.getLogger(__name__)
 class Trainer:
     """Main training orchestrator with concurrent battle support."""
 
-    def __init__(self, config: Config, server_configuration: ServerConfiguration = None):
+    def __init__(self, config: Config, server_configuration: ServerConfiguration = None, progress_callback=None):
         self.config = config
         self.server_config = server_configuration or LocalhostServerConfiguration
+        self._progress_callback = progress_callback  # callable(battle_count, total_battles) or None
 
         # Load teams
         self.team1_str = load_team(config.team1_path)
@@ -143,14 +144,18 @@ class Trainer:
             # Win probability estimator update
             wp_metrics = self.wp_estimator.maybe_update()
             if wp_metrics:
-                logger.info(
+                logger.debug(
                     f"  WP update: loss={wp_metrics.get('wp_loss', 0):.4f}, "
                     f"mean_pred={wp_metrics.get('wp_mean_pred', 0):.3f}"
                 )
 
             # Periodic logging
-            if self.battle_count % 10 == 0:
+            if self.battle_count % 50 == 0:
                 self._log_stats()
+
+            # Progress callback (for GUI progress bar etc.)
+            if self._progress_callback:
+                self._progress_callback(self.battle_count, self.config.total_battles)
 
         # Final checkpoint
         self._checkpoint_and_snapshot()
@@ -246,14 +251,14 @@ class Trainer:
         self.agent2.update_preview_policy()
 
         if metrics1:
-            logger.info(
+            logger.debug(
                 f"  Agent1 battle update: "
                 f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
                 f"value_loss={metrics1.get('value_loss', 0):.4f}, "
                 f"entropy={metrics1.get('entropy', 0):.4f}"
             )
         if metrics2:
-            logger.info(
+            logger.debug(
                 f"  Agent2 battle update: "
                 f"policy_loss={metrics2.get('policy_loss', 0):.4f}, "
                 f"value_loss={metrics2.get('value_loss', 0):.4f}, "

@@ -91,6 +91,7 @@ class PokeRLApp(tk.Tk):
         self._training_future = None
         self._training_stop = threading.Event()
         self._eval_future = None
+        self._training_start_time: Optional[float] = None
         self.log_queue: queue.Queue = queue.Queue(maxsize=5000)
 
         # Install queue log handler on root logger
@@ -187,6 +188,22 @@ class PokeRLApp(tk.Tk):
 
         self.train_status_var = tk.StringVar(value="Idle")
         ttk.Label(ctrl, textvariable=self.train_status_var, foreground="gray").pack(side="left", padx=12)
+
+        # --- Progress ---
+        prog_frame = ttk.LabelFrame(parent, text="Progress")
+        prog_frame.pack(fill="x", padx=6, pady=4)
+
+        self.train_progress = ttk.Progressbar(prog_frame, mode="determinate", maximum=100, value=0)
+        self.train_progress.pack(fill="x", padx=6, pady=(4, 2))
+
+        time_frame = ttk.Frame(prog_frame)
+        time_frame.pack(fill="x", padx=6, pady=(0, 4))
+        self.train_elapsed_var = tk.StringVar(value="Elapsed: --")
+        self.train_eta_var = tk.StringVar(value="ETA: --")
+        self.train_battles_var = tk.StringVar(value="")
+        ttk.Label(time_frame, textvariable=self.train_battles_var, foreground="gray").pack(side="left", padx=(0, 16))
+        ttk.Label(time_frame, textvariable=self.train_elapsed_var).pack(side="left", padx=(0, 16))
+        ttk.Label(time_frame, textvariable=self.train_eta_var).pack(side="left")
 
     # -- Evaluation tab ------------------------------------------------------
 
@@ -325,9 +342,9 @@ class PokeRLApp(tk.Tk):
         logger.info(msg)
 
     def _poll_log_queue(self):
-        """Drain the log queue into the ScrolledText widget."""
+        """Drain the log queue into the ScrolledText widget (max 20 msgs per tick)."""
         try:
-            while True:
+            for _ in range(20):
                 msg = self.log_queue.get_nowait()
                 self.log_text.configure(state="normal")
                 self.log_text.insert("end", msg + "\n")
@@ -336,6 +353,35 @@ class PokeRLApp(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._poll_log_queue)
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = int(seconds)
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h}h {m:02d}m {s:02d}s"
+        if m:
+            return f"{m}m {s:02d}s"
+        return f"{s}s"
+
+    def _on_progress_update(self, battle_count: int, total_battles: int):
+        """Update progress bar and time labels. Must be called on the main thread."""
+        pct = battle_count / total_battles * 100 if total_battles else 0
+        self.train_progress["value"] = pct
+        self.train_battles_var.set(f"{battle_count}/{total_battles} battles")
+
+        if self._training_start_time is not None and battle_count > 0:
+            elapsed = time.time() - self._training_start_time
+            self.train_elapsed_var.set(f"Elapsed: {self._format_duration(elapsed)}")
+            rate = battle_count / elapsed
+            remaining = total_battles - battle_count
+            eta = remaining / rate
+            self.train_eta_var.set(f"ETA: {self._format_duration(eta)}")
+        elif self._training_start_time is not None:
+            elapsed = time.time() - self._training_start_time
+            self.train_elapsed_var.set(f"Elapsed: {self._format_duration(elapsed)}")
+            self.train_eta_var.set("ETA: --")
 
     def _make_config(self, **overrides) -> Config:
         """Build a Config from current GUI state."""
@@ -448,10 +494,18 @@ class PokeRLApp(tk.Tk):
         self.train_status_var.set("Training...")
 
         self._log(f"Starting training: {config.total_battles} battles, format={config.battle_format}")
+        self._training_start_time = time.time()
+        self.train_progress["value"] = 0
+        self.train_battles_var.set(f"0/{config.total_battles} battles")
+        self.train_elapsed_var.set("Elapsed: 0s")
+        self.train_eta_var.set("ETA: --")
+
+        def _progress_cb(battle_count, total_battles):
+            self.after(0, lambda: self._on_progress_update(battle_count, total_battles))
 
         def train_thread():
             try:
-                trainer = Trainer(config)
+                trainer = Trainer(config, progress_callback=_progress_cb)
                 self._trainer = trainer
 
                 # Monkey-patch the trainer's train loop to check the stop flag
@@ -486,6 +540,10 @@ class PokeRLApp(tk.Tk):
         self.btn_train.config(state="normal")
         self.btn_stop_train.config(state="disabled")
         self.train_status_var.set("Idle")
+        self._training_start_time = None
+        self.train_battles_var.set("")
+        self.train_elapsed_var.set("Elapsed: --")
+        self.train_eta_var.set("ETA: --")
 
     # ----- Evaluation control -----------------------------------------------
 
