@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+checkpoints/
+replays/
+*.pt
+!teams/*.txt
+.env
+.venv/
+venv/
