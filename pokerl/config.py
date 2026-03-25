@@ -47,6 +47,13 @@ class Config:
     exploiter_fraction: float = 0.35  # fraction of games via PFSP
     self_play_fraction: float = 0.15  # fraction of self-play games
 
+    # --- League admission & pruning ---
+    league_min_size: int = 4  # min agents before admission gate activates
+    league_admit_win_rate_delta: float = 0.05  # min |ΔWR| to trigger admission
+    league_admit_param_novelty: float = 0.05  # min relative param distance for admission
+    league_prune_interval: int = 200  # battles between pruning passes
+    league_prune_similarity: float = 0.02  # relative param distance below which agents are redundant
+
     # --- Training ---
     total_battles: int = 100000
     num_parallel_battles: int = 1

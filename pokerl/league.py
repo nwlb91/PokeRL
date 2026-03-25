@@ -6,7 +6,8 @@ Implements a simplified version of AlphaStar's league training:
    against each other and against historical league opponents.
 
 2. **League**: A pool of frozen agent checkpoints. As main agents improve,
-   periodic snapshots are added to the league.
+   snapshots are added to the league *only if they pass admission criteria*
+   (sufficient novelty or performance change).
 
 3. **Payoff Matrix**: Tracks win rates between all pairs of agents in the
    league, used for Prioritized Fictitious Self-Play (PFSP).
@@ -15,12 +16,17 @@ Implements a simplified version of AlphaStar's league training:
    prioritize opponents that the current agent struggles against, preventing
    blind spots.
 
+5. **Pruning**: Periodically removes redundant agents — those that are
+   superseded by similar-but-stronger agents — keeping the league lean and
+   relevant.
+
 Opponent selection distribution per battle:
   - main_agent_fraction: play against the other team's latest agent
   - exploiter_fraction: play against a PFSP-selected historical opponent
   - self_play_fraction: play against own team's historical checkpoint
 """
 
+import logging
 import math
 import os
 import random
@@ -33,17 +39,22 @@ import torch
 from pokerl.agent import PPOAgent
 from pokerl.config import Config
 
+logger = logging.getLogger(__name__)
+
 
 class LeagueAgent:
     """A frozen agent snapshot in the league."""
 
     def __init__(self, agent_id: str, team_id: int, state_dict: dict,
-                 checkpoint_path: str, battle_count: int):
+                 checkpoint_path: str, battle_count: int,
+                 win_rate_at_snapshot: float = 0.5):
         self.agent_id = agent_id
         self.team_id = team_id  # 0 or 1
         self.state_dict = state_dict
         self.checkpoint_path = checkpoint_path
         self.battle_count = battle_count
+        self.win_rate_at_snapshot = win_rate_at_snapshot
+        self.selection_count = 0  # how often selected as opponent
 
 
 class PayoffMatrix:
@@ -83,7 +94,13 @@ class PayoffMatrix:
 
 
 class League:
-    """AlphaStar-style league for training diverse agents."""
+    """AlphaStar-style league for training diverse agents.
+
+    Agents are admitted based on novelty (parameter divergence from existing
+    members) or performance change (win-rate shift since the last snapshot).
+    Redundant agents — those superseded by similar-but-stronger members — are
+    periodically pruned so the league stays lean and relevant.
+    """
 
     def __init__(self, config: Config):
         self.config = config
@@ -92,17 +109,55 @@ class League:
         self.checkpoint_dir = Path(config.checkpoint_dir) / "league"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self._next_id = 0
+        self._last_prune_battle = 0
 
-    def add_agent(self, agent: PPOAgent, team_id: int) -> str:
-        """Snapshot a training agent and add it to the league.
+    # ------------------------------------------------------------------
+    # Admission
+    # ------------------------------------------------------------------
 
-        Args:
-            agent: The agent to snapshot.
-            team_id: Which team this agent plays (0 or 1).
+    def add_agent(self, agent: PPOAgent, team_id: int,
+                  current_win_rate: float = 0.5) -> Optional[str]:
+        """Snapshot a training agent and add it to the league *if* it passes
+        the admission gate.
+
+        Admission is granted when any of the following hold:
+        - The team has fewer agents than ``league_min_size // 2`` (cold start).
+        - The main agent's win rate has shifted by at least
+          ``league_admit_win_rate_delta`` since the last same-team admission.
+        - The agent's parameters are at least ``league_admit_param_novelty``
+          (relative L2) away from every existing same-team member.
 
         Returns:
-            The league agent's ID.
+            The league agent's ID if admitted, ``None`` otherwise.
         """
+        team_agents = self.get_team_agents(team_id)
+
+        # Always admit during cold start
+        if len(team_agents) < self.config.league_min_size // 2:
+            return self._admit_agent(agent, team_id, current_win_rate)
+
+        # Gate 1: Win-rate delta
+        last_wr = team_agents[-1].win_rate_at_snapshot
+        wr_delta = abs(current_win_rate - last_wr)
+        if wr_delta >= self.config.league_admit_win_rate_delta:
+            return self._admit_agent(agent, team_id, current_win_rate)
+
+        # Gate 2: Parameter novelty
+        candidate_state = agent.get_state_dict()
+        min_dist = self._min_param_distance(candidate_state, team_agents)
+        if min_dist >= self.config.league_admit_param_novelty:
+            return self._admit_agent(agent, team_id, current_win_rate)
+
+        logger.debug(
+            f"League admission denied for team {team_id}: "
+            f"wr_delta={wr_delta:.4f} (need {self.config.league_admit_win_rate_delta}), "
+            f"param_novelty={min_dist:.4f} (need {self.config.league_admit_param_novelty})"
+        )
+        return None
+
+    def _admit_agent(self, agent: PPOAgent, team_id: int,
+                     win_rate: float) -> str:
+        """Unconditionally add an agent snapshot to the league."""
         agent_id = f"league_{team_id}_{self._next_id:04d}"
         self._next_id += 1
 
@@ -117,14 +172,23 @@ class League:
             state_dict=state,
             checkpoint_path=checkpoint_path,
             battle_count=agent.total_battles,
+            win_rate_at_snapshot=win_rate,
         )
         self.agents.append(league_agent)
 
-        # Trim league if too large (keep most recent + diverse set)
+        # Hard cap — use quality-based trimming
         if len(self.agents) > self.config.league_size:
             self._trim_league()
 
+        logger.info(
+            f"Agent {agent_id} admitted to league "
+            f"(wr={win_rate:.1%}, league_size={len(self.agents)})"
+        )
         return agent_id
+
+    # ------------------------------------------------------------------
+    # Opponent selection
+    # ------------------------------------------------------------------
 
     def select_opponent(
         self, current_agent_id: str, current_team_id: int
@@ -147,16 +211,20 @@ class League:
 
         if roll < self.config.main_agent_fraction:
             # Play against the latest opponent
-            return opponents[-1]
+            selected = opponents[-1]
         elif roll < self.config.main_agent_fraction + self.config.exploiter_fraction:
             # PFSP: prioritize hard opponents
-            return self._pfsp_select(current_agent_id, opponents)
+            selected = self._pfsp_select(current_agent_id, opponents)
         else:
             # Self-play: play against own team's historical checkpoint
             own_agents = [a for a in self.agents if a.team_id == current_team_id]
             if own_agents:
-                return random.choice(own_agents)
-            return opponents[-1]
+                selected = random.choice(own_agents)
+            else:
+                selected = opponents[-1]
+
+        selected.selection_count += 1
+        return selected
 
     def _pfsp_select(
         self, current_agent_id: str, opponents: List[LeagueAgent]
@@ -167,7 +235,7 @@ class League:
         sampled with HIGHER probability (to fix weaknesses).
 
         Uses softmax with negative win rates:
-            p(opponent) \u221d exp(-win_rate / temperature)
+            p(opponent) ∝ exp(-win_rate / temperature)
         """
         if len(opponents) == 1:
             return opponents[0]
@@ -187,48 +255,191 @@ class League:
         idx = np.random.choice(len(opponents), p=probs)
         return opponents[idx]
 
-    def _trim_league(self):
-        """Remove oldest agents when league exceeds max size.
+    # ------------------------------------------------------------------
+    # Pruning
+    # ------------------------------------------------------------------
 
-        Keeps the most recent agent per team and a diverse set based on
-        spacing throughout training history.
+    def maybe_prune(self, current_battle_count: int):
+        """Run a pruning pass if enough battles have elapsed."""
+        if (current_battle_count - self._last_prune_battle
+                < self.config.league_prune_interval):
+            return
+        self._last_prune_battle = current_battle_count
+        self._prune_redundant()
+
+    def _prune_redundant(self):
+        """Remove agents superseded by similar-but-stronger league members.
+
+        For each pair of same-team agents whose relative parameter distance is
+        below ``league_prune_similarity``, the lower-quality agent (by
+        ``_agent_quality_score``) is removed.  The most recent agent per team
+        is always protected.
+        """
+        if len(self.agents) <= self.config.league_min_size:
+            return
+
+        # Protect most recent per team
+        protected = self._protected_agent_ids()
+        to_remove: set = set()
+
+        for team_id in range(2):
+            team_agents = [a for a in self.agents if a.team_id == team_id]
+
+            for agent in team_agents:
+                if agent.agent_id in protected or agent.agent_id in to_remove:
+                    continue
+
+                for other in team_agents:
+                    if other.agent_id == agent.agent_id or other.agent_id in to_remove:
+                        continue
+
+                    dist = self._param_distance(agent.state_dict, other.state_dict)
+                    if dist < self.config.league_prune_similarity:
+                        # Similar pair — remove the weaker one
+                        if self._agent_quality_score(agent) <= self._agent_quality_score(other):
+                            to_remove.add(agent.agent_id)
+                            break
+
+        # Never prune below minimum size
+        max_removable = len(self.agents) - self.config.league_min_size
+        if len(to_remove) > max_removable:
+            # Keep the lowest-scored ones in to_remove, drop the rest
+            scored = sorted(to_remove, key=lambda aid: self._score_by_id(aid))
+            to_remove = set(scored[:max_removable])
+
+        if to_remove:
+            self.agents = [a for a in self.agents if a.agent_id not in to_remove]
+            logger.info(
+                f"Pruned {len(to_remove)} redundant league agents "
+                f"(remaining: {len(self.agents)})"
+            )
+
+    def _agent_quality_score(self, agent: LeagueAgent) -> float:
+        """Score an agent's overall quality (higher = more valuable).
+
+        Combines:
+        - Strength: win rate at time of snapshot.
+        - Recency: newer agents are likelier to represent better strategies.
+        - Utility: agents selected more often by PFSP are more useful.
+        """
+        strength = agent.win_rate_at_snapshot
+        recency = agent.battle_count / max(1, self._max_battle_count())
+        utility = math.log1p(agent.selection_count) / 10.0
+        return 0.4 * strength + 0.4 * recency + 0.2 * utility
+
+    def _score_by_id(self, agent_id: str) -> float:
+        """Look up quality score by agent ID."""
+        for a in self.agents:
+            if a.agent_id == agent_id:
+                return self._agent_quality_score(a)
+        return 0.0
+
+    def _max_battle_count(self) -> int:
+        if not self.agents:
+            return 1
+        return max(a.battle_count for a in self.agents)
+
+    # ------------------------------------------------------------------
+    # Hard-cap trimming (quality-based)
+    # ------------------------------------------------------------------
+
+    def _trim_league(self):
+        """Remove lowest-quality agents when the league exceeds its size cap.
+
+        Unlike the old spacing-based approach, this scores every agent and
+        removes the weakest ones (the most recent agent per team is always
+        protected).
         """
         max_size = self.config.league_size
+        protected = self._protected_agent_ids()
 
-        # Always keep the latest agent for each team
-        latest = {}
+        # Score non-protected agents
+        scored = [
+            (self._agent_quality_score(a), a.agent_id)
+            for a in self.agents
+            if a.agent_id not in protected
+        ]
+        scored.sort()  # lowest score first
+
+        n_to_remove = len(self.agents) - max_size
+        to_remove = set(aid for _, aid in scored[:n_to_remove])
+
+        self.agents = [a for a in self.agents if a.agent_id not in to_remove]
+
+    def _protected_agent_ids(self) -> set:
+        """IDs of the most recent agent per team (never pruned/trimmed)."""
+        latest: Dict[int, str] = {}
         for agent in reversed(self.agents):
             if agent.team_id not in latest:
-                latest[agent.team_id] = agent
+                latest[agent.team_id] = agent.agent_id
+        return set(latest.values())
 
-        # Keep evenly spaced agents from history
-        keep = set(a.agent_id for a in latest.values())
-        remaining = [a for a in self.agents if a.agent_id not in keep]
+    # ------------------------------------------------------------------
+    # Parameter-space utilities
+    # ------------------------------------------------------------------
 
-        # Evenly sample from remaining
-        n_to_keep = max_size - len(keep)
-        if n_to_keep > 0 and remaining:
-            step = max(1, len(remaining) // n_to_keep)
-            for i in range(0, len(remaining), step):
-                keep.add(remaining[i].agent_id)
-                if len(keep) >= max_size:
-                    break
+    @staticmethod
+    def _flatten_params(state_dict: dict) -> torch.Tensor:
+        """Flatten all tensor parameters into a single vector."""
+        tensors = []
+        for key in sorted(state_dict.keys()):
+            val = state_dict[key]
+            if isinstance(val, torch.Tensor):
+                tensors.append(val.flatten().float())
+        if not tensors:
+            return torch.zeros(1)
+        return torch.cat(tensors)
 
-        self.agents = [a for a in self.agents if a.agent_id in keep]
+    @classmethod
+    def _param_distance(cls, state_a: dict, state_b: dict) -> float:
+        """Relative L2 distance between two parameter sets.
+
+        Computed as ``||a - b|| / ((||a|| + ||b||) / 2)``, giving a
+        scale-invariant value in roughly [0, 2].
+        """
+        flat_a = cls._flatten_params(state_a)
+        flat_b = cls._flatten_params(state_b)
+        if flat_a.shape != flat_b.shape:
+            return 2.0  # incompatible = maximally different
+        diff_norm = torch.norm(flat_a - flat_b).item()
+        scale = (torch.norm(flat_a).item() + torch.norm(flat_b).item()) / 2 + 1e-8
+        return diff_norm / scale
+
+    @classmethod
+    def _min_param_distance(cls, candidate_state: dict,
+                            agents: List[LeagueAgent]) -> float:
+        """Minimum relative param distance from *candidate_state* to any agent."""
+        if not agents:
+            return float('inf')
+        return min(
+            cls._param_distance(candidate_state, a.state_dict)
+            for a in agents
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def get_team_agents(self, team_id: int) -> List[LeagueAgent]:
         """Get all league agents for a specific team."""
         return [a for a in self.agents if a.team_id == team_id]
 
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
     def get_state_dict(self) -> dict:
         return {
             "next_id": self._next_id,
+            "last_prune_battle": self._last_prune_battle,
             "agents": [
                 {
                     "agent_id": a.agent_id,
                     "team_id": a.team_id,
                     "checkpoint_path": a.checkpoint_path,
                     "battle_count": a.battle_count,
+                    "win_rate_at_snapshot": a.win_rate_at_snapshot,
+                    "selection_count": a.selection_count,
                 }
                 for a in self.agents
             ],
@@ -237,6 +448,7 @@ class League:
 
     def load_state_dict(self, state: dict):
         self._next_id = state["next_id"]
+        self._last_prune_battle = state.get("last_prune_battle", 0)
         self.payoff.load_state_dict(state["payoff"])
 
         self.agents = []
@@ -250,5 +462,7 @@ class League:
                     state_dict=saved_state,
                     checkpoint_path=cp_path,
                     battle_count=agent_data["battle_count"],
+                    win_rate_at_snapshot=agent_data.get("win_rate_at_snapshot", 0.5),
                 )
+                league_agent.selection_count = agent_data.get("selection_count", 0)
                 self.agents.append(league_agent)

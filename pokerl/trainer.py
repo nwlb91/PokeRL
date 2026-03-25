@@ -312,20 +312,26 @@ class Trainer:
             )
 
     def _checkpoint_and_snapshot(self):
-        """Save checkpoint and add agents to league."""
+        """Save checkpoint and maybe add agents to league."""
+        wr = self._recent_win_rate()
+
         self.ckpt_manager.save(
             self.agent1, self.agent2,
             self.league, self.wp_estimator,
             self.battle_count,
             extra_metadata={
-                "recent_win_rate": self._recent_win_rate(),
+                "recent_win_rate": wr,
                 "agent1_wins": self.agent1.wins,
                 "agent2_wins": self.agent2.wins,
             },
         )
 
-        self.league.add_agent(self.agent1, team_id=0)
-        self.league.add_agent(self.agent2, team_id=1)
+        # Admission-gated: only adds if the agent is novel or has improved
+        self.league.add_agent(self.agent1, team_id=0, current_win_rate=wr)
+        self.league.add_agent(self.agent2, team_id=1, current_win_rate=1 - wr)
+
+        # Periodic pruning of redundant agents
+        self.league.maybe_prune(self.battle_count)
 
         logger.info(
             f"Checkpoint at battle {self.battle_count}. "
