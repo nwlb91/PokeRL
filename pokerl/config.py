@@ -41,7 +41,7 @@ class Config:
 
     # --- Evaluation ---
     greedy_eval_interval: int = 200       # run greedy eval every N battles (0 to disable)
-    greedy_eval_battles: int = 10         # number of deterministic battles per eval
+    greedy_eval_battles: int = 10         # number of evaluation battles per eval
     plateau_metric: str = "greedy_wr"     # metric for plateau detection: "greedy_wr", "train_wr", or "explained_variance"
 
     # --- AlphaStar League ---

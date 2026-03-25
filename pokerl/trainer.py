@@ -75,7 +75,7 @@ class Trainer:
         self._player1: Optional[RLPlayer] = None
         self._player2: Optional[RLPlayer] = None
 
-        # Eval players — deterministic, no data collection
+        # Eval players — stochastic (sample from policy), no data collection
         self._eval_player1: Optional[RLPlayer] = None
         self._eval_player2: Optional[RLPlayer] = None
 
@@ -126,7 +126,7 @@ class Trainer:
                 config=self.config,
                 team_str=self.team1_str,
                 collect_data=False,
-                deterministic=True,
+                deterministic=False,
                 max_concurrent=1,
                 server_configuration=self.server_config,
             )
@@ -140,16 +140,17 @@ class Trainer:
                 config=self.config,
                 team_str=self.team2_str,
                 collect_data=False,
-                deterministic=True,
+                deterministic=False,
                 max_concurrent=1,
                 server_configuration=self.server_config,
             )
         return self._eval_player2
 
     async def _run_greedy_eval(self) -> float:
-        """Run deterministic evaluation battles between the two main agents.
+        """Run evaluation battles between the two main agents.
 
-        Returns greedy win rate for agent1.
+        Agents sample from their policy distributions (stochastic) to
+        match real play conditions.  Returns eval win rate for agent1.
         """
         player1 = self._get_or_create_eval_player1()
         player2 = self._get_or_create_eval_player2()
