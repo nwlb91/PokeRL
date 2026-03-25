@@ -86,6 +86,12 @@ def parse_args():
     parser.add_argument("--server-url", default="localhost")
     parser.add_argument("--server-port", type=int, default=8000)
 
+    # Uncertainty-weighted exploration
+    parser.add_argument("--uncertainty-heads", type=int, default=1,
+                        help="Ensemble policy heads for uncertainty exploration (1=disabled)")
+    parser.add_argument("--uncertainty-weight", type=float, default=0.5,
+                        help="Logit bonus scaling for per-action uncertainty")
+
     # Device
     parser.add_argument("--device", default="cpu",
                         help="Device for training (cpu/cuda)")
@@ -130,6 +136,8 @@ def main():
         league_size=args.league_size,
         checkpoint_interval=args.checkpoint_interval,
         pfsp_temperature=args.pfsp_temperature,
+        uncertainty_heads=args.uncertainty_heads,
+        uncertainty_weight=args.uncertainty_weight,
         total_battles=args.total_battles,
         device=args.device,
         checkpoint_dir=args.checkpoint_dir,
@@ -139,10 +147,16 @@ def main():
         server_port=args.server_port,
     )
 
-    logging.getLogger(__name__).info(
+    log = logging.getLogger(__name__)
+    log.info(
         f"Config: format={config.battle_format}, gen={config.gen}, "
         f"action_size={config.action_size}, gimmicks={config.num_gimmicks}"
     )
+    if config.uncertainty_heads > 1:
+        log.info(
+            f"Uncertainty-weighted exploration: "
+            f"heads={config.uncertainty_heads}, weight={config.uncertainty_weight}"
+        )
 
     # Create trainer and run
     trainer = Trainer(config)

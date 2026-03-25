@@ -59,6 +59,10 @@ class Config:
     league_prune_interval: int = 200  # battles between pruning passes
     league_prune_similarity: float = 0.02  # relative param distance below which agents are redundant
 
+    # --- Uncertainty-weighted exploration ---
+    uncertainty_heads: int = 1           # ensemble policy heads (1 = disabled, >1 = enabled)
+    uncertainty_weight: float = 0.5      # logit bonus scaling for per-action uncertainty
+
     # --- Training ---
     total_battles: int = 100000
     num_parallel_battles: int = 1

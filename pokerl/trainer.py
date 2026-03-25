@@ -381,7 +381,7 @@ class Trainer:
             self._latest_explained_variance = metrics1.get(
                 'explained_variance', 0.0
             )
-            logger.debug(
+            msg = (
                 f"  Agent1 battle update: "
                 f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
                 f"value_loss={metrics1.get('value_loss', 0):.4f}, "
@@ -389,8 +389,11 @@ class Trainer:
                 f"explained_var={metrics1.get('explained_variance', 0):.4f}, "
                 f"mean_ep_return={metrics1.get('mean_episode_return', 0):.4f}"
             )
+            if 'mean_uncertainty' in metrics1:
+                msg += f", uncertainty={metrics1['mean_uncertainty']:.4f}"
+            logger.debug(msg)
         if metrics2:
-            logger.debug(
+            msg = (
                 f"  Agent2 battle update: "
                 f"policy_loss={metrics2.get('policy_loss', 0):.4f}, "
                 f"value_loss={metrics2.get('value_loss', 0):.4f}, "
@@ -398,6 +401,9 @@ class Trainer:
                 f"explained_var={metrics2.get('explained_variance', 0):.4f}, "
                 f"mean_ep_return={metrics2.get('mean_episode_return', 0):.4f}"
             )
+            if 'mean_uncertainty' in metrics2:
+                msg += f", uncertainty={metrics2['mean_uncertainty']:.4f}"
+            logger.debug(msg)
 
     def _checkpoint_and_snapshot(self):
         """Save checkpoint and maybe add agents to league."""

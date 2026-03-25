@@ -100,6 +100,8 @@ class PPOAgent:
             action_size=config.action_size,
             hidden_size=config.hidden_size,
             num_layers=config.num_layers,
+            uncertainty_heads=config.uncertainty_heads,
+            uncertainty_weight=config.uncertainty_weight,
         ).to(self.device)
 
         # Team preview network
@@ -107,6 +109,8 @@ class PPOAgent:
             obs_size=TEAM_PREVIEW_OBS_SIZE,
             hidden_size=config.hidden_size // 2,
             num_leads=config.team_preview_action_size,
+            uncertainty_heads=config.uncertainty_heads,
+            uncertainty_weight=config.uncertainty_weight,
         ).to(self.device)
 
         # Try torch.compile for PyTorch 2.0+
@@ -147,7 +151,7 @@ class PPOAgent:
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
 
-            logits, value = self.battle_net(obs_t, mask_t)
+            logits, value = self.battle_net(obs_t, mask_t, deterministic=deterministic)
 
             dist = torch.distributions.Categorical(logits=logits)
             if deterministic:
@@ -170,7 +174,7 @@ class PPOAgent:
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(mask).unsqueeze(0).to(self.device)
 
-            logits, value = self.preview_net(obs_t, mask_t)
+            logits, value = self.preview_net(obs_t, mask_t, deterministic=deterministic)
 
             dist = torch.distributions.Categorical(logits=logits)
             if deterministic:
@@ -292,13 +296,23 @@ class PPOAgent:
         if num_batches == 0:
             return {}
 
-        return {
+        stats = {
             "policy_loss": total_policy_loss / num_batches,
             "value_loss": total_value_loss / num_batches,
             "entropy": total_entropy / num_batches,
             "explained_variance": explained_var,
             "mean_episode_return": mean_ep_return,
         }
+
+        # Log ensemble uncertainty if enabled
+        if hasattr(network, 'mean_ensemble_uncertainty') and network.num_uncertainty_heads > 1:
+            sample_n = min(256, n)
+            sample_idx = torch.randperm(n, device=self.device)[:sample_n]
+            stats["mean_uncertainty"] = network.mean_ensemble_uncertainty(
+                all_obs[sample_idx], all_masks[sample_idx]
+            )
+
+        return stats
 
     def get_state_dict(self) -> dict:
         """Get full agent state for checkpointing."""
@@ -315,10 +329,14 @@ class PPOAgent:
         }
 
     def load_state_dict(self, state: dict):
-        """Load agent state from checkpoint."""
+        """Load agent state from checkpoint.
+
+        Uses strict=False so old checkpoints without ensemble heads
+        still load correctly (new heads keep their random init).
+        """
         self.agent_id = state.get("agent_id", self.agent_id)
-        self.battle_net.load_state_dict(state["battle_net"])
-        self.preview_net.load_state_dict(state["preview_net"])
+        self.battle_net.load_state_dict(state["battle_net"], strict=False)
+        self.preview_net.load_state_dict(state["preview_net"], strict=False)
         if "battle_optimizer" in state:
             self.battle_optimizer.load_state_dict(state["battle_optimizer"])
         if "preview_optimizer" in state:
@@ -330,8 +348,8 @@ class PPOAgent:
 
     def load_weights_only(self, state: dict):
         """Load only network weights (for frozen league opponents)."""
-        self.battle_net.load_state_dict(state["battle_net"])
-        self.preview_net.load_state_dict(state["preview_net"])
+        self.battle_net.load_state_dict(state["battle_net"], strict=False)
+        self.preview_net.load_state_dict(state["preview_net"], strict=False)
 
     def set_eval(self):
         self.battle_net.eval()
