@@ -208,6 +208,24 @@ class PPOAgent:
             cfg.gamma, cfg.gae_lambda, last_value=0.0
         )
 
+        # Explained variance: how well the critic predicts returns
+        values_arr = np.array([step.value for step in buffer.steps], dtype=np.float32)
+        var_returns = np.var(returns)
+        explained_var = (
+            1.0 - np.var(returns - values_arr) / var_returns
+            if var_returns > 1e-8 else 0.0
+        )
+
+        # Mean episode return
+        episode_returns = []
+        current_return = 0.0
+        for step in buffer.steps:
+            current_return += step.reward
+            if step.done:
+                episode_returns.append(current_return)
+                current_return = 0.0
+        mean_ep_return = float(np.mean(episode_returns)) if episode_returns else 0.0
+
         # Normalize advantages
         if n > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -278,6 +296,8 @@ class PPOAgent:
             "policy_loss": total_policy_loss / num_batches,
             "value_loss": total_value_loss / num_batches,
             "entropy": total_entropy / num_batches,
+            "explained_variance": explained_var,
+            "mean_episode_return": mean_ep_return,
         }
 
     def get_state_dict(self) -> dict:

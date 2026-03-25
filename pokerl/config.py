@@ -39,6 +39,11 @@ class Config:
     damage_reward_weight: float = 0.1  # weight for damage differential in terminal reward
     survival_reward_per_turn: float = 0.005  # small per-turn bonus for staying alive
 
+    # --- Evaluation ---
+    greedy_eval_interval: int = 200       # run greedy eval every N battles (0 to disable)
+    greedy_eval_battles: int = 10         # number of deterministic battles per eval
+    plateau_metric: str = "greedy_wr"     # metric for plateau detection: "greedy_wr", "train_wr", or "explained_variance"
+
     # --- AlphaStar League ---
     league_size: int = 20  # max agents in the league
     checkpoint_interval: int = 50  # battles between checkpoints

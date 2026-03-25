@@ -63,10 +63,16 @@ class Trainer:
 
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
+        self.greedy_eval_results: List[Tuple[int, float]] = []  # (battle_count, win_rate)
+        self._latest_explained_variance: float = 0.0
 
         # Persistent players — reused across battles to avoid reconnections
         self._player1: Optional[RLPlayer] = None
         self._player2: Optional[RLPlayer] = None
+
+        # Eval players — deterministic, no data collection
+        self._eval_player1: Optional[RLPlayer] = None
+        self._eval_player2: Optional[RLPlayer] = None
 
         # Plateau detector — window and patience scale with checkpoint interval
         # so that the detector has enough granularity regardless of how often
@@ -106,6 +112,63 @@ class Trainer:
                 server_configuration=self.server_config,
             )
         return self._player2
+
+    def _get_or_create_eval_player1(self) -> RLPlayer:
+        """Reuse persistent eval player1 or create a new one."""
+        if self._eval_player1 is None:
+            self._eval_player1 = create_player(
+                agent=self.agent1,
+                config=self.config,
+                team_str=self.team1_str,
+                collect_data=False,
+                deterministic=True,
+                max_concurrent=1,
+                server_configuration=self.server_config,
+            )
+        return self._eval_player1
+
+    def _get_or_create_eval_player2(self) -> RLPlayer:
+        """Reuse persistent eval player2 or create a new one."""
+        if self._eval_player2 is None:
+            self._eval_player2 = create_player(
+                agent=self.agent2,
+                config=self.config,
+                team_str=self.team2_str,
+                collect_data=False,
+                deterministic=True,
+                max_concurrent=1,
+                server_configuration=self.server_config,
+            )
+        return self._eval_player2
+
+    async def _run_greedy_eval(self) -> float:
+        """Run deterministic evaluation battles between the two main agents.
+
+        Returns greedy win rate for agent1.
+        """
+        player1 = self._get_or_create_eval_player1()
+        player2 = self._get_or_create_eval_player2()
+
+        self.agent1.set_eval()
+        self.agent2.set_eval()
+
+        wins_before = player1.n_won_battles
+        total_before = player1.n_finished_battles
+
+        n = self.config.greedy_eval_battles
+        await player1.battle_against(player2, n_battles=n)
+
+        wins_after = player1.n_won_battles
+        total_after = player1.n_finished_battles
+        played = total_after - total_before
+        wins = wins_after - wins_before
+
+        self.agent1.set_train()
+        self.agent2.set_train()
+
+        wr = wins / played if played > 0 else 0.5
+        self.greedy_eval_results.append((self.battle_count, wr))
+        return wr
 
     def resume_if_available(self):
         """Resume from latest checkpoint if available."""
@@ -160,17 +223,35 @@ class Trainer:
                     f"mean_pred={wp_metrics.get('wp_mean_pred', 0):.3f}"
                 )
 
+            # Periodic greedy evaluation
+            if (self.config.greedy_eval_interval > 0 and
+                    self.battle_count % self.config.greedy_eval_interval == 0):
+                greedy_wr = await self._run_greedy_eval()
+                logger.info(
+                    f"  Greedy eval at battle {self.battle_count}: "
+                    f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
+                )
+
             # Periodic logging + plateau detection
             if self.battle_count % 50 == 0:
                 self._log_stats()
 
-                # Feed win rate to the plateau detector at each log interval
+                # Feed chosen metric to the plateau detector
                 wr = self._recent_win_rate()
-                plateau_info = self.plateau_detector.update(wr, self.battle_count)
+                if (self.config.plateau_metric == "greedy_wr"
+                        and self.greedy_eval_results):
+                    metric_val = self.greedy_eval_results[-1][1]
+                elif self.config.plateau_metric == "explained_variance":
+                    metric_val = self._latest_explained_variance
+                else:
+                    metric_val = wr
+                plateau_info = self.plateau_detector.update(
+                    metric_val, self.battle_count
+                )
                 if plateau_info.is_plateau and plateau_info.streak == self.plateau_detector.patience:
                     logger.warning(
                         f"Learning plateau detected at battle {self.battle_count} "
-                        f"(win rate ~{wr:.1%}, slope={plateau_info.slope:.6f}, "
+                        f"(metric={metric_val:.4f}, slope={plateau_info.slope:.6f}, "
                         f"p={plateau_info.p_value:.3f})"
                     )
 
@@ -297,18 +378,25 @@ class Trainer:
         self.agent2.update_preview_policy()
 
         if metrics1:
+            self._latest_explained_variance = metrics1.get(
+                'explained_variance', 0.0
+            )
             logger.debug(
                 f"  Agent1 battle update: "
                 f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
                 f"value_loss={metrics1.get('value_loss', 0):.4f}, "
-                f"entropy={metrics1.get('entropy', 0):.4f}"
+                f"entropy={metrics1.get('entropy', 0):.4f}, "
+                f"explained_var={metrics1.get('explained_variance', 0):.4f}, "
+                f"mean_ep_return={metrics1.get('mean_episode_return', 0):.4f}"
             )
         if metrics2:
             logger.debug(
                 f"  Agent2 battle update: "
                 f"policy_loss={metrics2.get('policy_loss', 0):.4f}, "
                 f"value_loss={metrics2.get('value_loss', 0):.4f}, "
-                f"entropy={metrics2.get('entropy', 0):.4f}"
+                f"entropy={metrics2.get('entropy', 0):.4f}, "
+                f"explained_var={metrics2.get('explained_variance', 0):.4f}, "
+                f"mean_ep_return={metrics2.get('mean_episode_return', 0):.4f}"
             )
 
     def _checkpoint_and_snapshot(self):
@@ -321,6 +409,11 @@ class Trainer:
             self.battle_count,
             extra_metadata={
                 "recent_win_rate": wr,
+                "greedy_win_rate": (
+                    self.greedy_eval_results[-1][1]
+                    if self.greedy_eval_results else None
+                ),
+                "explained_variance": self._latest_explained_variance,
                 "agent1_wins": self.agent1.wins,
                 "agent2_wins": self.agent2.wins,
             },
@@ -341,9 +434,13 @@ class Trainer:
     def _log_stats(self):
         """Log training statistics."""
         wr = self._recent_win_rate()
+        greedy_str = ""
+        if self.greedy_eval_results:
+            _, last_greedy_wr = self.greedy_eval_results[-1]
+            greedy_str = f" | Greedy WR: {last_greedy_wr:.1%}"
         logger.info(
             f"Battle {self.battle_count}/{self.config.total_battles} | "
-            f"Team1 recent WR: {wr:.1%} | "
+            f"Team1 recent WR: {wr:.1%}{greedy_str} | "
             f"Agent1: {self.agent1.wins}W/{self.agent1.losses}L | "
             f"Agent2: {self.agent2.wins}W/{self.agent2.losses}L | "
             f"League: {len(self.league.agents)} agents"
