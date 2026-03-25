@@ -240,17 +240,36 @@ class PokeRLApp(tk.Tk):
         self._plateau_label = ttk.Label(time_frame, textvariable=self.train_plateau_var, foreground="red")
         self._plateau_label.pack(side="right", padx=(16, 0))
 
-        # --- Win-rate chart with plateau visualisation ---
-        chart_frame = ttk.LabelFrame(parent, text="Win Rate & Plateau Detection")
+        # --- Summary stats ---
+        stats_frame = ttk.LabelFrame(parent, text="Training Stats")
+        stats_frame.pack(fill="x", padx=6, pady=4)
+
+        self.stat_greedy_wr_var = tk.StringVar(value="Greedy WR: --")
+        self.stat_train_wr_var = tk.StringVar(value="Train WR: --")
+        self.stat_policy_loss_var = tk.StringVar(value="Policy Loss: --")
+        self.stat_value_loss_var = tk.StringVar(value="Value Loss: --")
+        self.stat_entropy_var = tk.StringVar(value="Entropy: --")
+        self.stat_expl_var_var = tk.StringVar(value="Expl. Var: --")
+        self.stat_ep_return_var = tk.StringVar(value="Ep. Return: --")
+
+        for i, var in enumerate([
+            self.stat_greedy_wr_var, self.stat_train_wr_var,
+            self.stat_policy_loss_var, self.stat_value_loss_var,
+            self.stat_entropy_var, self.stat_expl_var_var,
+            self.stat_ep_return_var,
+        ]):
+            ttk.Label(stats_frame, textvariable=var, font=("Consolas", 9)).grid(
+                row=i // 4, column=i % 4, sticky="w", padx=8, pady=1,
+            )
+
+        # --- Charts: 2x2 grid (win rate, loss curves, entropy, explained variance) ---
+        chart_frame = ttk.LabelFrame(parent, text="Training Charts")
         chart_frame.pack(fill="both", expand=True, padx=6, pady=4)
 
-        self._fig, self._ax = plt.subplots(figsize=(7, 2.4), dpi=90)
+        self._fig, self._axes = plt.subplots(2, 2, figsize=(7, 4.2), dpi=90)
         self._fig.patch.set_facecolor("#f0f0f0")
-        self._ax.set_xlabel("Battle")
-        self._ax.set_ylabel("Win Rate")
-        self._ax.set_ylim(-0.05, 1.05)
-        self._ax.axhline(y=0.5, color="gray", linewidth=0.5, linestyle="--")
-        self._fig.tight_layout(pad=1.5)
+        self._ax = self._axes[0, 0]  # keep reference for plateau chart compat
+        self._fig.tight_layout(pad=2.0, h_pad=2.5, w_pad=2.0)
 
         self._canvas = FigureCanvasTkAgg(self._fig, master=chart_frame)
         self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=2, pady=2)
@@ -495,8 +514,10 @@ class PokeRLApp(tk.Tk):
         return f"{s}s"
 
     def _on_progress_update(self, battle_count: int, total_battles: int,
-                            plateau_detector: "PlateauDetector | None" = None):
-        """Update progress bar, time labels, and plateau chart."""
+                            plateau_detector: "PlateauDetector | None" = None,
+                            metrics_history: "list | None" = None,
+                            greedy_eval_results: "list | None" = None):
+        """Update progress bar, time labels, and training charts."""
         pct = battle_count / total_battles * 100 if total_battles else 0
         self.train_progress["value"] = pct
         self.train_battles_var.set(f"{battle_count}/{total_battles} battles")
@@ -513,63 +534,151 @@ class PokeRLApp(tk.Tk):
             self.train_elapsed_var.set(f"Elapsed: {self._format_duration(elapsed)}")
             self.train_eta_var.set("ETA: --")
 
-        # Update the plateau chart
-        if plateau_detector is not None:
-            self._update_plateau_chart(plateau_detector)
+        # Update summary stat labels
+        self._update_stat_labels(metrics_history, greedy_eval_results)
 
-    def _update_plateau_chart(self, detector: "PlateauDetector"):
-        """Redraw the win-rate chart with plateau shading."""
-        wr_hist = detector._win_rates
-        bc_hist = detector._battle_counts
-        if not wr_hist:
-            return
+        # Update all training charts
+        self._update_training_charts(plateau_detector, metrics_history, greedy_eval_results)
 
-        ax = self._ax
-        ax.clear()
+    def _update_stat_labels(self, metrics_history: "list | None",
+                            greedy_eval_results: "list | None"):
+        """Update the summary stat labels with latest values."""
+        if greedy_eval_results:
+            _, gwr = greedy_eval_results[-1]
+            self.stat_greedy_wr_var.set(f"Greedy WR: {gwr:.1%}")
+        if metrics_history:
+            m = metrics_history[-1]
+            self.stat_policy_loss_var.set(f"Policy Loss: {m['policy_loss']:.4f}")
+            self.stat_value_loss_var.set(f"Value Loss: {m['value_loss']:.4f}")
+            self.stat_entropy_var.set(f"Entropy: {m['entropy']:.4f}")
+            self.stat_expl_var_var.set(f"Expl. Var: {m['explained_variance']:.4f}")
+            self.stat_ep_return_var.set(f"Ep. Return: {m['mean_episode_return']:.4f}")
 
-        # Style
-        ax.set_xlabel("Battle", fontsize=9)
-        ax.set_ylabel("Win Rate", fontsize=9)
-        ax.set_ylim(-0.05, 1.05)
-        ax.axhline(y=0.5, color="gray", linewidth=0.5, linestyle="--")
-        ax.tick_params(labelsize=8)
+    def _update_training_charts(self, detector: "PlateauDetector | None",
+                                metrics_history: "list | None",
+                                greedy_eval_results: "list | None"):
+        """Redraw all four training charts."""
+        ax_wr, ax_loss, ax_entropy, ax_ev = (
+            self._axes[0, 0], self._axes[0, 1],
+            self._axes[1, 0], self._axes[1, 1],
+        )
 
-        # Win rate line
-        ax.plot(bc_hist, wr_hist, color="#1f77b4", linewidth=1.5, label="Win Rate")
+        # --- Top-left: Win Rate & Plateau Detection ---
+        ax_wr.clear()
+        ax_wr.set_title("Win Rate", fontsize=9, fontweight="bold")
+        ax_wr.set_xlabel("Battle", fontsize=8)
+        ax_wr.set_ylabel("Win Rate", fontsize=8)
+        ax_wr.set_ylim(-0.05, 1.05)
+        ax_wr.axhline(y=0.5, color="gray", linewidth=0.5, linestyle="--")
+        ax_wr.tick_params(labelsize=7)
 
-        # Shade plateau regions in red
-        regions = list(detector._plateau_regions)
-        if detector._in_plateau_since is not None:
-            regions.append((detector._in_plateau_since, len(wr_hist) - 1))
+        if detector is not None:
+            wr_hist = detector._win_rates
+            bc_hist = detector._battle_counts
+            if wr_hist:
+                ax_wr.plot(bc_hist, wr_hist, color="#1f77b4", linewidth=1.5, label="Train WR")
 
-        for start_idx, end_idx in regions:
-            start_idx = max(0, min(start_idx, len(bc_hist) - 1))
-            end_idx = max(0, min(end_idx, len(bc_hist) - 1))
-            ax.axvspan(
-                bc_hist[start_idx], bc_hist[end_idx],
-                alpha=0.25, color="#d62728", zorder=0,
-            )
+                # Update train WR label
+                self.stat_train_wr_var.set(f"Train WR: {wr_hist[-1]:.1%}")
 
-        # Legend
+                # Shade plateau regions
+                regions = list(detector._plateau_regions)
+                if detector._in_plateau_since is not None:
+                    regions.append((detector._in_plateau_since, len(wr_hist) - 1))
+                for start_idx, end_idx in regions:
+                    start_idx = max(0, min(start_idx, len(bc_hist) - 1))
+                    end_idx = max(0, min(end_idx, len(bc_hist) - 1))
+                    ax_wr.axvspan(
+                        bc_hist[start_idx], bc_hist[end_idx],
+                        alpha=0.25, color="#d62728", zorder=0,
+                    )
+
+            # Plateau status label
+            is_plateau = detector._streak >= detector.patience
+            if is_plateau:
+                self.train_plateau_var.set("PLATEAU DETECTED")
+                self._plateau_label.configure(foreground="red")
+            elif len(wr_hist) < detector.window:
+                self.train_plateau_var.set(f"Collecting data ({len(wr_hist)}/{detector.window})")
+                self._plateau_label.configure(foreground="gray")
+            else:
+                self.train_plateau_var.set("Learning")
+                self._plateau_label.configure(foreground="green")
+
+        # Overlay greedy eval win rate
+        if greedy_eval_results and len(greedy_eval_results) > 0:
+            ge_battles = [r[0] for r in greedy_eval_results]
+            ge_wrs = [r[1] for r in greedy_eval_results]
+            ax_wr.plot(ge_battles, ge_wrs, color="#ff7f0e", linewidth=1.5,
+                       marker="o", markersize=3, label="Greedy WR")
+
         handles = [
-            plt.Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="Win Rate"),
+            plt.Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="Train WR"),
+            plt.Line2D([0], [0], color="#ff7f0e", linewidth=1.5, marker="o",
+                       markersize=3, label="Greedy WR"),
             Patch(facecolor="#d62728", alpha=0.25, label="Plateau"),
         ]
-        ax.legend(handles=handles, fontsize=8, loc="upper left")
+        ax_wr.legend(handles=handles, fontsize=7, loc="upper left")
 
-        # Plateau status label
-        is_plateau = detector._streak >= detector.patience
-        if is_plateau:
-            self.train_plateau_var.set("PLATEAU DETECTED")
-            self._plateau_label.configure(foreground="red")
-        elif len(wr_hist) < detector.window:
-            self.train_plateau_var.set(f"Collecting data ({len(wr_hist)}/{detector.window})")
-            self._plateau_label.configure(foreground="gray")
-        else:
-            self.train_plateau_var.set("Learning")
-            self._plateau_label.configure(foreground="green")
+        # --- Remaining charts require metrics_history ---
+        if not metrics_history:
+            self._fig.tight_layout(pad=2.0, h_pad=2.5, w_pad=2.0)
+            self._canvas.draw_idle()
+            return
 
-        self._fig.tight_layout(pad=1.5)
+        battles = [m['battle_count'] for m in metrics_history]
+
+        # --- Top-right: Policy Loss & Value Loss ---
+        ax_loss.clear()
+        ax_loss.set_title("Losses", fontsize=9, fontweight="bold")
+        ax_loss.set_xlabel("Battle", fontsize=8)
+        ax_loss.set_ylabel("Loss", fontsize=8)
+        ax_loss.tick_params(labelsize=7)
+        ax_loss.plot(battles, [m['policy_loss'] for m in metrics_history],
+                     color="#d62728", linewidth=1.2, label="Policy Loss")
+        ax_loss.plot(battles, [m['value_loss'] for m in metrics_history],
+                     color="#9467bd", linewidth=1.2, label="Value Loss")
+        ax_loss.legend(fontsize=7, loc="upper right")
+
+        # --- Bottom-left: Entropy ---
+        ax_entropy.clear()
+        ax_entropy.set_title("Policy Entropy", fontsize=9, fontweight="bold")
+        ax_entropy.set_xlabel("Battle", fontsize=8)
+        ax_entropy.set_ylabel("Entropy", fontsize=8)
+        ax_entropy.tick_params(labelsize=7)
+        ax_entropy.plot(battles, [m['entropy'] for m in metrics_history],
+                        color="#2ca02c", linewidth=1.2)
+
+        # --- Bottom-right: Explained Variance & Episode Return ---
+        # Remove any previous twin axis before recreating
+        if hasattr(self, '_ax_return_twin'):
+            self._ax_return_twin.remove()
+        ax_ev.clear()
+        ax_ev.set_title("Value Quality", fontsize=9, fontweight="bold")
+        ax_ev.set_xlabel("Battle", fontsize=8)
+        ax_ev.tick_params(labelsize=7)
+
+        color_ev = "#1f77b4"
+        ax_ev.set_ylabel("Explained Var.", fontsize=8, color=color_ev)
+        ax_ev.plot(battles, [m['explained_variance'] for m in metrics_history],
+                   color=color_ev, linewidth=1.2, label="Expl. Var.")
+        ax_ev.tick_params(axis='y', labelcolor=color_ev, labelsize=7)
+        ax_ev.set_ylim(-0.1, 1.1)
+
+        # Secondary y-axis for mean episode return
+        self._ax_return_twin = ax_ev.twinx()
+        color_ret = "#ff7f0e"
+        self._ax_return_twin.set_ylabel("Ep. Return", fontsize=8, color=color_ret)
+        self._ax_return_twin.plot(battles, [m['mean_episode_return'] for m in metrics_history],
+                                  color=color_ret, linewidth=1.2, label="Ep. Return")
+        self._ax_return_twin.tick_params(axis='y', labelcolor=color_ret, labelsize=7)
+
+        # Combined legend
+        lines_ev = ax_ev.get_lines() + self._ax_return_twin.get_lines()
+        labels_ev = [l.get_label() for l in lines_ev]
+        ax_ev.legend(lines_ev, labels_ev, fontsize=7, loc="upper left")
+
+        self._fig.tight_layout(pad=2.0, h_pad=2.5, w_pad=2.0)
         self._canvas.draw_idle()
 
     def _make_config(self, **overrides) -> Config:
@@ -689,9 +798,11 @@ class PokeRLApp(tk.Tk):
         self.train_elapsed_var.set("Elapsed: 0s")
         self.train_eta_var.set("ETA: --")
 
-        def _progress_cb(battle_count, total_battles, plateau_detector=None):
-            self.after(0, lambda bc=battle_count, tb=total_battles, pd=plateau_detector:
-                       self._on_progress_update(bc, tb, pd))
+        def _progress_cb(battle_count, total_battles, plateau_detector=None,
+                         metrics_history=None, greedy_eval_results=None):
+            self.after(0, lambda bc=battle_count, tb=total_battles, pd=plateau_detector,
+                              mh=metrics_history, ge=greedy_eval_results:
+                       self._on_progress_update(bc, tb, pd, mh, ge))
 
         def train_thread():
             try:
@@ -735,6 +846,13 @@ class PokeRLApp(tk.Tk):
         self.train_elapsed_var.set("Elapsed: --")
         self.train_eta_var.set("ETA: --")
         self.train_plateau_var.set("")
+        self.stat_greedy_wr_var.set("Greedy WR: --")
+        self.stat_train_wr_var.set("Train WR: --")
+        self.stat_policy_loss_var.set("Policy Loss: --")
+        self.stat_value_loss_var.set("Value Loss: --")
+        self.stat_entropy_var.set("Entropy: --")
+        self.stat_expl_var_var.set("Expl. Var: --")
+        self.stat_ep_return_var.set("Ep. Return: --")
 
     # ----- Evaluation control -----------------------------------------------
 

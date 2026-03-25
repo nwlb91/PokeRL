@@ -66,6 +66,9 @@ class Trainer:
         self.greedy_eval_results: List[Tuple[int, float]] = []  # (battle_count, win_rate)
         self._latest_explained_variance: float = 0.0
 
+        # Training metrics history (populated after each PPO update)
+        self.metrics_history: List[dict] = []  # each entry keyed by metric name
+
         # Persistent players — reused across battles to avoid reconnections
         self._player1: Optional[RLPlayer] = None
         self._player2: Optional[RLPlayer] = None
@@ -261,6 +264,8 @@ class Trainer:
                     self.battle_count,
                     self.config.total_battles,
                     self.plateau_detector,
+                    self.metrics_history,
+                    self.greedy_eval_results,
                 )
 
         # Final checkpoint
@@ -381,6 +386,14 @@ class Trainer:
             self._latest_explained_variance = metrics1.get(
                 'explained_variance', 0.0
             )
+            self.metrics_history.append({
+                'battle_count': self.battle_count,
+                'policy_loss': metrics1.get('policy_loss', 0.0),
+                'value_loss': metrics1.get('value_loss', 0.0),
+                'entropy': metrics1.get('entropy', 0.0),
+                'explained_variance': metrics1.get('explained_variance', 0.0),
+                'mean_episode_return': metrics1.get('mean_episode_return', 0.0),
+            })
             msg = (
                 f"  Agent1 battle update: "
                 f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
