@@ -79,13 +79,18 @@ class PolicyValueNet(nn.Module):
         )
 
     def forward(self, obs: torch.Tensor, action_mask: torch.Tensor,
-                deterministic: bool = False):
+                deterministic: bool = False,
+                detach_uncertainty: bool = False):
         """Forward pass.
 
         Args:
             obs: (batch, obs_size) battle observation
             action_mask: (batch, action_size) binary mask of legal actions
             deterministic: if True, use mean logits only (no uncertainty bonus)
+            detach_uncertainty: if True, detach std from computation graph so
+                gradients only flow through the mean logits.  Used during PPO
+                updates to keep importance-sampling ratios consistent while
+                preventing the uncertainty bonus from corrupting policy gradients.
 
         Returns:
             logits: (batch, action_size) masked log-probabilities
@@ -105,6 +110,8 @@ class PolicyValueNet(nn.Module):
                 logits = mean_logits
             else:
                 std_logits = all_logits.std(dim=0)
+                if detach_uncertainty:
+                    std_logits = std_logits.detach()
                 logits = mean_logits + self.uncertainty_weight * std_logits
         else:
             logits = self.policy_head(features)
@@ -117,7 +124,8 @@ class PolicyValueNet(nn.Module):
 
     def get_action_and_value(self, obs: torch.Tensor, action_mask: torch.Tensor,
                               action: torch.Tensor = None,
-                              deterministic: bool = False):
+                              deterministic: bool = False,
+                              detach_uncertainty: bool = False):
         """Sample or evaluate an action.
 
         Args:
@@ -125,11 +133,16 @@ class PolicyValueNet(nn.Module):
             action_mask: (batch, action_size)
             action: optional (batch,) action to evaluate
             deterministic: if True, no uncertainty bonus in logits
+            detach_uncertainty: if True, stop gradients through ensemble std
 
         Returns:
             action, log_prob, entropy, value
         """
-        logits, value = self.forward(obs, action_mask, deterministic=deterministic)
+        logits, value = self.forward(
+            obs, action_mask,
+            deterministic=deterministic,
+            detach_uncertainty=detach_uncertainty,
+        )
         dist = torch.distributions.Categorical(logits=logits)
 
         if action is None:
@@ -199,7 +212,8 @@ class TeamPreviewNet(nn.Module):
         self.value_head = nn.Linear(hidden_size, 1)
 
     def forward(self, obs: torch.Tensor, mask: torch.Tensor,
-                deterministic: bool = False):
+                deterministic: bool = False,
+                detach_uncertainty: bool = False):
         features = self.net(obs)
 
         if self.num_uncertainty_heads > 1:
@@ -214,6 +228,8 @@ class TeamPreviewNet(nn.Module):
                 logits = mean_logits
             else:
                 std_logits = all_logits.std(dim=0)
+                if detach_uncertainty:
+                    std_logits = std_logits.detach()
                 logits = mean_logits + self.uncertainty_weight * std_logits
         else:
             logits = self.policy_head(features)
@@ -224,8 +240,13 @@ class TeamPreviewNet(nn.Module):
 
     def get_action_and_value(self, obs: torch.Tensor, mask: torch.Tensor,
                               action: torch.Tensor = None,
-                              deterministic: bool = False):
-        logits, value = self.forward(obs, mask, deterministic=deterministic)
+                              deterministic: bool = False,
+                              detach_uncertainty: bool = False):
+        logits, value = self.forward(
+            obs, mask,
+            deterministic=deterministic,
+            detach_uncertainty=detach_uncertainty,
+        )
         dist = torch.distributions.Categorical(logits=logits)
 
         if action is None:

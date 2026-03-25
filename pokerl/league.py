@@ -43,18 +43,35 @@ logger = logging.getLogger(__name__)
 
 
 class LeagueAgent:
-    """A frozen agent snapshot in the league."""
+    """A frozen agent snapshot in the league.
 
-    def __init__(self, agent_id: str, team_id: int, state_dict: dict,
+    Weights are lazy-loaded from disk on first access and can be evicted
+    via :meth:`unload` to reclaim RAM when the league grows large.
+    """
+
+    def __init__(self, agent_id: str, team_id: int, state_dict: Optional[dict],
                  checkpoint_path: str, battle_count: int,
                  win_rate_at_snapshot: float = 0.5):
         self.agent_id = agent_id
         self.team_id = team_id  # 0 or 1
-        self.state_dict = state_dict
+        self._state_dict: Optional[dict] = state_dict
         self.checkpoint_path = checkpoint_path
         self.battle_count = battle_count
         self.win_rate_at_snapshot = win_rate_at_snapshot
         self.selection_count = 0  # how often selected as opponent
+
+    @property
+    def state_dict(self) -> dict:
+        """Lazy-load weights from disk if not already cached."""
+        if self._state_dict is None:
+            self._state_dict = torch.load(
+                self.checkpoint_path, map_location="cpu", weights_only=True
+            )
+        return self._state_dict
+
+    def unload(self):
+        """Free cached weights to reclaim RAM."""
+        self._state_dict = None
 
 
 class PayoffMatrix:
@@ -179,6 +196,10 @@ class League:
         # Hard cap — use quality-based trimming
         if len(self.agents) > self.config.league_size:
             self._trim_league()
+
+        # Unload older agents' cached weights to reclaim RAM.
+        # Keep only the two most recent per team loaded.
+        self._evict_old_weights()
 
         logger.info(
             f"Agent {agent_id} admitted to league "
@@ -388,6 +409,15 @@ class League:
 
         self.agents = [a for a in self.agents if a.agent_id not in to_remove]
 
+    def _evict_old_weights(self, keep_per_team: int = 2):
+        """Unload cached weights for all but the *keep_per_team* most recent
+        agents per team, freeing RAM while keeping frequently-used agents hot."""
+        for team_id in range(2):
+            team_agents = [a for a in self.agents if a.team_id == team_id]
+            # Most recent are at the end of the list
+            for agent in team_agents[:-keep_per_team]:
+                agent.unload()
+
     def _protected_agent_ids(self) -> set:
         """IDs of the most recent agent per team (never pruned/trimmed)."""
         latest: Dict[int, str] = {}
@@ -477,11 +507,11 @@ class League:
         for agent_data in state["agents"]:
             cp_path = agent_data["checkpoint_path"]
             if os.path.exists(cp_path):
-                saved_state = torch.load(cp_path, map_location="cpu", weights_only=True)
+                # Weights are lazy-loaded on first access via LeagueAgent.state_dict
                 league_agent = LeagueAgent(
                     agent_id=agent_data["agent_id"],
                     team_id=agent_data["team_id"],
-                    state_dict=saved_state,
+                    state_dict=None,
                     checkpoint_path=cp_path,
                     battle_count=agent_data["battle_count"],
                     win_rate_at_snapshot=agent_data.get("win_rate_at_snapshot", 0.5),

@@ -44,11 +44,6 @@ _CATEGORY_INDEX = {
     MoveCategory.STATUS: 2,
 }
 
-# Pre-allocate reusable zero arrays (templates)
-_ZEROS_69 = np.zeros(69, dtype=np.float32)
-_ZEROS_37 = np.zeros(37, dtype=np.float32)
-
-
 def _encode_type_into(buf: np.ndarray, offset: int, ptype: Optional[PokemonType]):
     """Write one-hot PokemonType into buf at offset (20 dims). No allocation."""
     if ptype is not None:
@@ -89,7 +84,7 @@ def _encode_pokemon_base_into(buf: np.ndarray, offset: int, mon: Optional[Pokemo
     buf[o] = float(mon.fainted); o += 1
     buf[o] = float(mon.active); o += 1
     buf[o] = float(mon.must_recharge); o += 1
-    buf[o] = float(mon.preparing); o += 1
+    buf[o] = float(mon.preparing is not None); o += 1
     buf[o] = min(mon.protect_counter, 6) / 6.0
 
 

@@ -102,8 +102,15 @@ class Trainer:
             cv_threshold=0.10,
         )
 
-        # Concurrency
-        self._n_concurrent = max(1, config.num_parallel_battles)
+        # Concurrency — batch post-processing currently assumes one battle at a
+        # time (KO/damage tracking, observation lists, and win attribution are
+        # per-player singletons that get overwritten across concurrent battles).
+        if config.num_parallel_battles > 1:
+            logger.warning(
+                "num_parallel_battles > 1 is not yet supported correctly "
+                "(per-battle reward data is lost). Forcing to 1."
+            )
+        self._n_concurrent = 1
 
     def _get_or_create_player1(self) -> RLPlayer:
         """Reuse persistent player1 or create a new one."""
@@ -282,6 +289,12 @@ class Trainer:
             # PPO updates when buffer is full enough
             if len(self.agent1.battle_buffer) >= self.config.rollout_steps:
                 self._update_agents()
+
+            # Team preview updates on a separate (lower) threshold so lead
+            # selection learns at a comparable rate despite producing only
+            # one sample per game.
+            if len(self.agent1.preview_buffer) >= self.config.preview_rollout_steps:
+                self._update_preview()
 
             # Periodic checkpoint + league snapshot
             if self.battle_count % self.config.checkpoint_interval == 0:
@@ -546,13 +559,11 @@ class Trainer:
 
         metrics1 = self.agent1.update_battle_policy(entropy_coef_override=ent_coef)
         metrics2 = self.agent2.update_battle_policy(entropy_coef_override=ent_coef)
-        self.agent1.update_preview_policy(entropy_coef_override=ent_coef)
-        self.agent2.update_preview_policy(entropy_coef_override=ent_coef)
 
-        # Step LR schedulers
+        # Step LR schedulers (agent2 uses inverted metric since wr is from team1's perspective)
         wr = self._recent_win_rate()
         self.agent1.step_lr_scheduler(metric=wr)
-        self.agent2.step_lr_scheduler(metric=wr)
+        self.agent2.step_lr_scheduler(metric=1.0 - wr)
 
         if metrics1:
             self._latest_explained_variance = metrics1.get(
@@ -588,6 +599,22 @@ class Trainer:
             if 'mean_uncertainty' in metrics2:
                 msg += f", uncertainty={metrics2['mean_uncertainty']:.4f}"
             logger.debug(msg)
+
+    def _update_preview(self):
+        """Run PPO updates for both agents' team preview policies.
+
+        Uses separate rollout threshold and more PPO epochs to compensate
+        for the much sparser data (1 step per game vs ~20-40 for battle).
+        """
+        ent_coef = self._get_effective_entropy_coef()
+        self.agent1.update_preview_policy(
+            entropy_coef_override=ent_coef,
+            ppo_epochs_override=self.config.preview_ppo_epochs,
+        )
+        self.agent2.update_preview_policy(
+            entropy_coef_override=ent_coef,
+            ppo_epochs_override=self.config.preview_ppo_epochs,
+        )
 
     def _checkpoint_and_snapshot(self):
         """Save checkpoint and maybe add agents to league."""

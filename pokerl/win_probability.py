@@ -15,6 +15,7 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
@@ -98,7 +99,13 @@ class WinProbabilityEstimator:
 
         for i, obs in enumerate(observations):
             progress = (i + 1) / n
-            label = 0.5 + progress * (outcome - 0.5)
+            # Exponential ramp: early-game labels stay near 0.5 (uncertain),
+            # late-game labels converge quickly to the actual outcome.  This
+            # better reflects reality where a single pivotal turn can swing
+            # win probability, versus linear interpolation which under-weights
+            # late-game shifts.
+            confidence = progress * progress  # quadratic ramp
+            label = 0.5 + confidence * (outcome - 0.5)
             self.buffer.append((obs, label))
 
         self.battles_since_update += 1
@@ -130,6 +137,7 @@ class WinProbabilityEstimator:
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         self.total_updates += 1

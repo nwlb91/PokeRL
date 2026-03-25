@@ -78,11 +78,13 @@ class RolloutBuffer:
         actions = np.array([self.steps[i].action for i in range(n)], dtype=np.int64)
         masks = np.array([self.steps[i].action_mask for i in range(n)])
         log_probs = np.array([self.steps[i].log_prob for i in range(n)], dtype=np.float32)
+        old_values = np.array([self.steps[i].value for i in range(n)], dtype=np.float32)
         return (
             torch.from_numpy(obs).to(device),
             torch.from_numpy(actions).to(device),
             torch.from_numpy(masks).to(device),
             torch.from_numpy(log_probs).to(device),
+            torch.from_numpy(old_values).to(device),
         )
 
 
@@ -228,16 +230,19 @@ class PPOAgent:
             entropy_coef_override=entropy_coef_override,
         )
 
-    def update_preview_policy(self, entropy_coef_override: Optional[float] = None) -> Dict[str, float]:
+    def update_preview_policy(self, entropy_coef_override: Optional[float] = None,
+                              ppo_epochs_override: Optional[int] = None) -> Dict[str, float]:
         """Run PPO update on team preview rollout buffer."""
         return self._ppo_update(
             self.preview_buffer, self.preview_net, self.preview_optimizer,
             entropy_coef_override=entropy_coef_override,
+            ppo_epochs_override=ppo_epochs_override,
         )
 
     def _ppo_update(
         self, buffer: RolloutBuffer, network: nn.Module, optimizer: optim.Optimizer,
         entropy_coef_override: Optional[float] = None,
+        ppo_epochs_override: Optional[int] = None,
     ) -> Dict[str, float]:
         """Generic PPO update on a buffer/network pair."""
         if len(buffer) == 0:
@@ -274,7 +279,7 @@ class PPOAgent:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Pre-convert ALL data to GPU tensors once
-        all_obs, all_actions, all_masks, all_old_lp = buffer.to_tensors(self.device)
+        all_obs, all_actions, all_masks, all_old_lp, all_old_values = buffer.to_tensors(self.device)
         all_returns = torch.from_numpy(returns).to(self.device)
         all_advantages = torch.from_numpy(advantages).to(self.device)
 
@@ -283,7 +288,8 @@ class PPOAgent:
         total_entropy = 0.0
         num_batches = 0
 
-        for epoch in range(cfg.ppo_epochs):
+        n_epochs = ppo_epochs_override if ppo_epochs_override is not None else cfg.ppo_epochs
+        for epoch in range(n_epochs):
             indices = torch.randperm(n, device=self.device)
 
             for start in range(0, n, cfg.batch_size):
@@ -295,11 +301,12 @@ class PPOAgent:
                 actions_t = all_actions[idx]
                 masks_t = all_masks[idx]
                 old_lp_t = all_old_lp[idx]
+                old_val_t = all_old_values[idx]
                 returns_t = all_returns[idx]
                 adv_t = all_advantages[idx]
 
                 _, new_lp, entropy, values = network.get_action_and_value(
-                    obs_t, masks_t, actions_t
+                    obs_t, masks_t, actions_t, detach_uncertainty=True
                 )
 
                 # Policy loss (clipped PPO)
@@ -308,8 +315,14 @@ class PPOAgent:
                 surr2 = torch.clamp(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * adv_t
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # Value loss
-                value_loss = F.mse_loss(values, returns_t)
+                # Value loss (clipped to prevent destructive critic updates)
+                values_clipped = old_val_t + torch.clamp(
+                    values - old_val_t, -cfg.clip_eps, cfg.clip_eps
+                )
+                value_loss = torch.max(
+                    F.mse_loss(values, returns_t),
+                    F.mse_loss(values_clipped, returns_t),
+                )
 
                 # Entropy bonus
                 entropy_loss = -entropy.mean()
