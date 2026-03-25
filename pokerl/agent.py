@@ -113,13 +113,14 @@ class PPOAgent:
             uncertainty_weight=config.uncertainty_weight,
         ).to(self.device)
 
-        # Try torch.compile for PyTorch 2.0+
+        # Try torch.compile for PyTorch 2.0+ (requires triton, not available on Windows)
         if hasattr(torch, "compile") and config.device != "cpu":
             try:
+                import triton  # noqa: F401
                 self.battle_net = torch.compile(self.battle_net)
                 self.preview_net = torch.compile(self.preview_net)
             except Exception:
-                pass  # graceful fallback
+                pass  # graceful fallback (triton not available)
 
         # Optimizers
         self.battle_optimizer = optim.Adam(
