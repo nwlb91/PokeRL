@@ -87,18 +87,58 @@ def parse_args():
     parser.add_argument("--server-port", type=int, default=8000)
 
     # Uncertainty-weighted exploration
-    parser.add_argument("--uncertainty-heads", type=int, default=1,
+    parser.add_argument("--uncertainty-heads", type=int, default=3,
                         help="Ensemble policy heads for uncertainty exploration (1=disabled)")
     parser.add_argument("--uncertainty-weight", type=float, default=0.5,
                         help="Logit bonus scaling for per-action uncertainty")
+
+    # Entropy scheduling
+    parser.add_argument("--entropy-start", type=float, default=0.05,
+                        help="Initial entropy coefficient for annealing")
+    parser.add_argument("--entropy-end", type=float, default=0.005,
+                        help="Floor entropy coefficient for annealing")
+    parser.add_argument("--entropy-anneal-battles", type=int, default=50000,
+                        help="Battles over which to anneal entropy (0=static)")
+
+    # Learning rate scheduling
+    parser.add_argument("--lr-schedule", default="cosine",
+                        choices=["constant", "cosine", "reduce_on_plateau"],
+                        help="Learning rate schedule")
+    parser.add_argument("--lr-min", type=float, default=1e-5,
+                        help="Minimum learning rate")
+    parser.add_argument("--lr-warmup-battles", type=int, default=1000,
+                        help="LR warmup period in battles")
+
+    # Best-model tracking
+    parser.add_argument("--no-best-model-tracking", action="store_true",
+                        help="Disable best-model checkpointing and regression rollback")
+    parser.add_argument("--regression-threshold", type=float, default=0.08,
+                        help="WR drop below best that triggers rollback")
+    parser.add_argument("--regression-eval-window", type=int, default=3,
+                        help="Consecutive bad evals before rollback")
+
+    # Infinite training & plateau response
+    parser.add_argument("--infinite", action="store_true",
+                        help="Train indefinitely (ignore --total-battles)")
+    parser.add_argument("--plateau-action", default="entropy_bump",
+                        choices=["entropy_bump", "noise_inject", "none"],
+                        help="Action to take on learning plateau")
+    parser.add_argument("--plateau-entropy-bump", type=float, default=0.03,
+                        help="Temporary entropy increase on plateau")
+    parser.add_argument("--plateau-bump-duration", type=int, default=2000,
+                        help="Battles to maintain entropy bump")
 
     # Device
     parser.add_argument("--device", default="cpu",
                         help="Device for training (cpu/cuda)")
 
-    # Logging
+    # Logging & cloud
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--headless", action="store_true",
+                        help="Headless mode for cloud/server deployment")
+    parser.add_argument("--log-file", default="",
+                        help="Path to log file (enables file logging)")
 
     return parser.parse_args()
 
@@ -107,11 +147,20 @@ def main():
     args = parse_args()
 
     # Configure logging
+    log_level = getattr(logging, args.log_level)
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    if args.log_file:
+        file_handler = logging.FileHandler(args.log_file)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logging.getLogger().addHandler(file_handler)
 
     # Build config
     config = Config(
@@ -121,10 +170,16 @@ def main():
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         lr=args.lr,
+        lr_schedule=args.lr_schedule,
+        lr_min=args.lr_min,
+        lr_warmup_battles=args.lr_warmup_battles,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         clip_eps=args.clip_eps,
         entropy_coef=args.entropy_coef,
+        entropy_coef_start=args.entropy_start,
+        entropy_coef_end=args.entropy_end,
+        entropy_anneal_battles=args.entropy_anneal_battles,
         batch_size=args.batch_size,
         rollout_steps=args.rollout_steps,
         num_parallel_battles=args.num_parallel_battles,
@@ -133,13 +188,22 @@ def main():
         ko_reward_weight=args.ko_reward_weight,
         damage_reward_weight=args.damage_reward_weight,
         survival_reward_per_turn=args.survival_reward,
+        best_model_tracking=not args.no_best_model_tracking,
+        regression_threshold=args.regression_threshold,
+        regression_eval_window=args.regression_eval_window,
         league_size=args.league_size,
         checkpoint_interval=args.checkpoint_interval,
         pfsp_temperature=args.pfsp_temperature,
         uncertainty_heads=args.uncertainty_heads,
         uncertainty_weight=args.uncertainty_weight,
         total_battles=args.total_battles,
+        infinite_training=args.infinite,
         device=args.device,
+        plateau_action=args.plateau_action,
+        plateau_entropy_bump=args.plateau_entropy_bump,
+        plateau_bump_duration=args.plateau_bump_duration,
+        headless=args.headless,
+        log_file=args.log_file,
         checkpoint_dir=args.checkpoint_dir,
         resume=args.resume or args.resume_path is not None,
         resume_path=args.resume_path,

@@ -18,10 +18,16 @@ class Config:
 
     # --- PPO hyperparameters ---
     lr: float = 3e-4
+    lr_schedule: str = "cosine"  # "constant", "cosine", or "reduce_on_plateau"
+    lr_min: float = 1e-5
+    lr_warmup_battles: int = 1000
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.01  # used when entropy_anneal_battles == 0
+    entropy_coef_start: float = 0.05
+    entropy_coef_end: float = 0.005
+    entropy_anneal_battles: int = 50000  # 0 = use static entropy_coef
     value_coef: float = 0.5
     max_grad_norm: float = 0.5
     ppo_epochs: int = 4
@@ -44,6 +50,11 @@ class Config:
     greedy_eval_battles: int = 10         # number of evaluation battles per eval
     plateau_metric: str = "greedy_wr"     # metric for plateau detection: "greedy_wr", "train_wr", or "explained_variance"
 
+    # --- Best-model tracking & regression protection ---
+    best_model_tracking: bool = True
+    regression_threshold: float = 0.08    # WR drop below best that triggers rollback
+    regression_eval_window: int = 3       # consecutive bad evals before rollback
+
     # --- AlphaStar League ---
     league_size: int = 20  # max agents in the league
     checkpoint_interval: int = 50  # battles between checkpoints
@@ -60,13 +71,23 @@ class Config:
     league_prune_similarity: float = 0.02  # relative param distance below which agents are redundant
 
     # --- Uncertainty-weighted exploration ---
-    uncertainty_heads: int = 1           # ensemble policy heads (1 = disabled, >1 = enabled)
+    uncertainty_heads: int = 3           # ensemble policy heads (1 = disabled, >1 = enabled)
     uncertainty_weight: float = 0.5      # logit bonus scaling for per-action uncertainty
 
     # --- Training ---
     total_battles: int = 100000
+    infinite_training: bool = False       # ignore total_battles, train forever
     num_parallel_battles: int = 1
     device: str = "cpu"
+
+    # --- Plateau response ---
+    plateau_action: str = "entropy_bump"  # "entropy_bump", "noise_inject", or "none"
+    plateau_entropy_bump: float = 0.03    # temporary entropy increase on plateau
+    plateau_bump_duration: int = 2000     # battles to maintain the bump
+
+    # --- Cloud / headless ---
+    headless: bool = False
+    log_file: str = ""
 
     # --- Checkpoints ---
     checkpoint_dir: str = "checkpoints"

@@ -192,14 +192,12 @@ class League:
 
     def select_opponent(
         self, current_agent_id: str, current_team_id: int
-    ) -> Optional[LeagueAgent]:
+    ) -> Optional[Tuple[LeagueAgent, str]]:
         """Select a league opponent using the mixed strategy.
 
-        The opponent is selected from the OTHER team's agents (so team1 agents
-        fight team2 agents).
-
         Returns:
-            A LeagueAgent to use as opponent, or None if league is empty.
+            A (LeagueAgent, selection_type) tuple, where selection_type is one
+            of "main", "pfsp", or "self_play".  Returns None if league is empty.
         """
         opponent_team_id = 1 - current_team_id
         opponents = [a for a in self.agents if a.team_id == opponent_team_id]
@@ -210,19 +208,43 @@ class League:
         roll = random.random()
 
         if roll < self.config.main_agent_fraction:
-            # Play against the latest opponent
             selected = opponents[-1]
+            kind = "main"
         elif roll < self.config.main_agent_fraction + self.config.exploiter_fraction:
-            # PFSP: prioritize hard opponents
             selected = self._pfsp_select(current_agent_id, opponents)
+            kind = "pfsp"
         else:
-            # Self-play: play against own team's historical checkpoint
             own_agents = [a for a in self.agents if a.team_id == current_team_id]
             if own_agents:
                 selected = random.choice(own_agents)
+                kind = "self_play"
             else:
                 selected = opponents[-1]
+                kind = "main"
 
+        selected.selection_count += 1
+        return selected, kind
+
+    def select_pfsp_opponent(
+        self, current_agent_id: str, current_team_id: int
+    ) -> Optional[LeagueAgent]:
+        """Select a PFSP opponent from the opposing team."""
+        opponent_team_id = 1 - current_team_id
+        opponents = [a for a in self.agents if a.team_id == opponent_team_id]
+        if not opponents:
+            return None
+        selected = self._pfsp_select(current_agent_id, opponents)
+        selected.selection_count += 1
+        return selected
+
+    def select_self_play_opponent(
+        self, current_team_id: int
+    ) -> Optional[LeagueAgent]:
+        """Select a random historical agent from the same team."""
+        own_agents = [a for a in self.agents if a.team_id == current_team_id]
+        if not own_agents:
+            return None
+        selected = random.choice(own_agents)
         selected.selection_count += 1
         return selected
 

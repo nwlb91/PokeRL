@@ -130,6 +130,10 @@ class PPOAgent:
             self.preview_net.parameters(), lr=config.lr
         )
 
+        # LR schedulers
+        self.battle_lr_scheduler = self._create_lr_scheduler(self.battle_optimizer)
+        self.preview_lr_scheduler = self._create_lr_scheduler(self.preview_optimizer)
+
         # Rollout buffers
         self.battle_buffer = RolloutBuffer()
         self.preview_buffer = RolloutBuffer()
@@ -139,6 +143,37 @@ class PPOAgent:
         self.total_updates = 0
         self.wins = 0
         self.losses = 0
+
+    def _create_lr_scheduler(self, optimizer: optim.Optimizer):
+        """Create an LR scheduler based on config."""
+        cfg = self.config
+        if cfg.lr_schedule == "cosine":
+            # Use warm restarts for infinite training compatibility.
+            # T_0 = estimated updates per entropy_anneal_battles cycle,
+            # falling back to a reasonable default.
+            updates_per_battle = 1.0 / max(1, cfg.rollout_steps // cfg.batch_size)
+            t_0 = max(10, int(10000 * updates_per_battle))
+            return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                optimizer, T_0=t_0, eta_min=cfg.lr_min,
+            )
+        elif cfg.lr_schedule == "reduce_on_plateau":
+            return optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="max", patience=10, factor=0.5,
+                min_lr=cfg.lr_min,
+            )
+        # "constant" — no scheduler
+        return None
+
+    def step_lr_scheduler(self, metric: Optional[float] = None):
+        """Step the LR schedulers after a PPO update."""
+        for sched in (self.battle_lr_scheduler, self.preview_lr_scheduler):
+            if sched is None:
+                continue
+            if isinstance(sched, optim.lr_scheduler.ReduceLROnPlateau):
+                if metric is not None:
+                    sched.step(metric)
+            else:
+                sched.step()
 
     def select_battle_action(
         self, obs: np.ndarray, action_mask: np.ndarray, deterministic: bool = False
@@ -186,20 +221,23 @@ class PPOAgent:
 
         return (action.item(), log_prob.item(), value.squeeze().item())
 
-    def update_battle_policy(self) -> Dict[str, float]:
+    def update_battle_policy(self, entropy_coef_override: Optional[float] = None) -> Dict[str, float]:
         """Run PPO update on battle rollout buffer."""
         return self._ppo_update(
-            self.battle_buffer, self.battle_net, self.battle_optimizer
+            self.battle_buffer, self.battle_net, self.battle_optimizer,
+            entropy_coef_override=entropy_coef_override,
         )
 
-    def update_preview_policy(self) -> Dict[str, float]:
+    def update_preview_policy(self, entropy_coef_override: Optional[float] = None) -> Dict[str, float]:
         """Run PPO update on team preview rollout buffer."""
         return self._ppo_update(
-            self.preview_buffer, self.preview_net, self.preview_optimizer
+            self.preview_buffer, self.preview_net, self.preview_optimizer,
+            entropy_coef_override=entropy_coef_override,
         )
 
     def _ppo_update(
-        self, buffer: RolloutBuffer, network: nn.Module, optimizer: optim.Optimizer
+        self, buffer: RolloutBuffer, network: nn.Module, optimizer: optim.Optimizer,
+        entropy_coef_override: Optional[float] = None,
     ) -> Dict[str, float]:
         """Generic PPO update on a buffer/network pair."""
         if len(buffer) == 0:
@@ -277,9 +315,10 @@ class PPOAgent:
                 entropy_loss = -entropy.mean()
 
                 # Total loss
+                ent_coef = entropy_coef_override if entropy_coef_override is not None else cfg.entropy_coef
                 loss = (policy_loss
                         + cfg.value_coef * value_loss
-                        + cfg.entropy_coef * entropy_loss)
+                        + ent_coef * entropy_loss)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -317,7 +356,7 @@ class PPOAgent:
 
     def get_state_dict(self) -> dict:
         """Get full agent state for checkpointing."""
-        return {
+        state = {
             "agent_id": self.agent_id,
             "battle_net": self.battle_net.state_dict(),
             "preview_net": self.preview_net.state_dict(),
@@ -328,6 +367,11 @@ class PPOAgent:
             "wins": self.wins,
             "losses": self.losses,
         }
+        if self.battle_lr_scheduler is not None:
+            state["battle_lr_scheduler"] = self.battle_lr_scheduler.state_dict()
+        if self.preview_lr_scheduler is not None:
+            state["preview_lr_scheduler"] = self.preview_lr_scheduler.state_dict()
+        return state
 
     def load_state_dict(self, state: dict):
         """Load agent state from checkpoint.
@@ -346,6 +390,10 @@ class PPOAgent:
         self.total_updates = state.get("total_updates", 0)
         self.wins = state.get("wins", 0)
         self.losses = state.get("losses", 0)
+        if "battle_lr_scheduler" in state and self.battle_lr_scheduler is not None:
+            self.battle_lr_scheduler.load_state_dict(state["battle_lr_scheduler"])
+        if "preview_lr_scheduler" in state and self.preview_lr_scheduler is not None:
+            self.preview_lr_scheduler.load_state_dict(state["preview_lr_scheduler"])
 
     def load_weights_only(self, state: dict):
         """Load only network weights (for frozen league opponents)."""

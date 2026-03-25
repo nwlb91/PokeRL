@@ -11,6 +11,7 @@ Orchestrates:
 
 import asyncio
 import logging
+import random
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -79,6 +80,18 @@ class Trainer:
         self._eval_player1: Optional[RLPlayer] = None
         self._eval_player2: Optional[RLPlayer] = None
 
+        # League opponent player (reused, weights swapped as needed)
+        self._league_opponent_agent: Optional[PPOAgent] = None
+        self._league_opponent_player: Optional[RLPlayer] = None
+        self._league_opponent_id: Optional[str] = None
+
+        # Best-model tracking and regression protection
+        self.best_eval_win_rate: float = 0.0
+        self.regression_counter: int = 0
+
+        # Plateau response: entropy bump
+        self._entropy_bump_until: int = 0
+
         # Plateau detector — window and patience scale with checkpoint interval
         # so that the detector has enough granularity regardless of how often
         # we sample.  Default: 20-observation window, 10-observation patience.
@@ -146,6 +159,56 @@ class Trainer:
             )
         return self._eval_player2
 
+    def _get_league_player(self, league_agent, team_id: int) -> RLPlayer:
+        """Get or create a frozen player for a league opponent.
+
+        Reuses the player if possible, only reloading weights when the
+        league agent changes.
+        """
+        from pokerl.league import LeagueAgent
+
+        if (self._league_opponent_player is not None
+                and self._league_opponent_id == league_agent.agent_id):
+            return self._league_opponent_player
+
+        # Create or reuse the agent shell
+        if self._league_opponent_agent is None:
+            self._league_opponent_agent = PPOAgent(self.config, agent_id=league_agent.agent_id)
+
+        self._league_opponent_agent.agent_id = league_agent.agent_id
+        self._league_opponent_agent.load_weights_only(league_agent.state_dict)
+
+        # Pick the right team string
+        team_str = self.team1_str if team_id == 0 else self.team2_str
+
+        # Create player if needed, or reuse existing (weights already swapped)
+        if self._league_opponent_player is None:
+            self._league_opponent_player = create_player(
+                agent=self._league_opponent_agent,
+                config=self.config,
+                team_str=team_str,
+                collect_data=False,
+                deterministic=False,
+                max_concurrent=self._n_concurrent,
+                server_configuration=self.server_config,
+            )
+
+        self._league_opponent_id = league_agent.agent_id
+        return self._league_opponent_player
+
+    def _get_effective_entropy_coef(self) -> float:
+        """Compute the entropy coefficient with annealing and plateau bump."""
+        cfg = self.config
+        if cfg.entropy_anneal_battles > 0:
+            progress = min(1.0, self.battle_count / cfg.entropy_anneal_battles)
+            coef = cfg.entropy_coef_start + progress * (cfg.entropy_coef_end - cfg.entropy_coef_start)
+        else:
+            coef = cfg.entropy_coef
+        # Plateau bump
+        if self.battle_count < self._entropy_bump_until:
+            coef += cfg.plateau_entropy_bump
+        return coef
+
     async def _run_greedy_eval(self) -> float:
         """Run evaluation battles between the two main agents.
 
@@ -204,12 +267,15 @@ class Trainer:
         logger.info(f"Action space size: {self.config.action_size}")
         logger.info(f"Battle obs size: 1032, Team preview obs size: 664")
 
-        while self.battle_count < self.config.total_battles:
+        while self.config.infinite_training or self.battle_count < self.config.total_battles:
             # Run a batch of concurrent battles
-            batch_size = min(
-                self._n_concurrent,
-                self.config.total_battles - self.battle_count,
-            )
+            if self.config.infinite_training:
+                batch_size = self._n_concurrent
+            else:
+                batch_size = min(
+                    self._n_concurrent,
+                    self.config.total_battles - self.battle_count,
+                )
             await self._run_battle_batch(batch_size)
             self.battle_count += batch_size
 
@@ -238,6 +304,36 @@ class Trainer:
                     f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
                 )
 
+                # Best-model tracking and regression rollback
+                if self.config.best_model_tracking:
+                    if greedy_wr > self.best_eval_win_rate:
+                        self.best_eval_win_rate = greedy_wr
+                        self.regression_counter = 0
+                        self.ckpt_manager.save_best(
+                            self.agent1, self.agent2,
+                            self.league, self.wp_estimator,
+                            self.battle_count, greedy_wr,
+                        )
+                    elif greedy_wr < self.best_eval_win_rate - self.config.regression_threshold:
+                        self.regression_counter += 1
+                        logger.warning(
+                            f"Regression signal {self.regression_counter}/"
+                            f"{self.config.regression_eval_window}: "
+                            f"current={greedy_wr:.1%}, best={self.best_eval_win_rate:.1%}"
+                        )
+                        if self.regression_counter >= self.config.regression_eval_window:
+                            logger.warning(
+                                f"Policy regression confirmed. "
+                                f"Rolling back to best model (WR={self.best_eval_win_rate:.1%})."
+                            )
+                            self.ckpt_manager.load_best(
+                                self.agent1, self.agent2,
+                                self.league, self.wp_estimator,
+                            )
+                            self.regression_counter = 0
+                    else:
+                        self.regression_counter = 0
+
             # Periodic logging + plateau detection
             if self.battle_count % 50 == 0:
                 self._log_stats()
@@ -260,6 +356,18 @@ class Trainer:
                         f"(metric={metric_val:.4f}, slope={plateau_info.slope:.6f}, "
                         f"p={plateau_info.p_value:.3f})"
                     )
+                    # Plateau response
+                    if self.config.plateau_action == "entropy_bump":
+                        self._entropy_bump_until = (
+                            self.battle_count + self.config.plateau_bump_duration
+                        )
+                        logger.info(
+                            f"Plateau response: entropy bump (+{self.config.plateau_entropy_bump}) "
+                            f"for {self.config.plateau_bump_duration} battles"
+                        )
+                    elif self.config.plateau_action == "noise_inject":
+                        self._inject_param_noise()
+                        logger.info("Plateau response: parameter noise injected")
 
             # Progress callback (for GUI progress bar etc.)
             if self._progress_callback:
@@ -279,70 +387,114 @@ class Trainer:
     async def _run_battle_batch(self, n_battles: int):
         """Run n_battles concurrently using poke-env's built-in concurrency.
 
-        poke-env multiplexes battles over a single websocket per player.
-        With max_concurrent_battles > 1, battle_against(n_battles=N) runs
-        up to max_concurrent_battles in parallel.
+        Selects opponents from the league when available, using the
+        configured main/PFSP/self-play distribution.  When a league
+        opponent is selected, only the training player collects data.
         """
-        player1 = self._get_or_create_player1()
-        player2 = self._get_or_create_player2()
+        # Decide which training player and opponent to use this batch.
+        # Alternate which agent gets league exposure each batch.
+        if self.battle_count % 2 == 0:
+            training_player_fn = self._get_or_create_player1
+            live_opponent_fn = self._get_or_create_player2
+            training_agent = self.agent1
+            live_agent = self.agent2
+            training_team_id = 0
+        else:
+            training_player_fn = self._get_or_create_player2
+            live_opponent_fn = self._get_or_create_player1
+            training_agent = self.agent2
+            live_agent = self.agent1
+            training_team_id = 1
+
+        training_player = training_player_fn()
+        use_league = False
+        opponent_agent_id = live_agent.agent_id
+
+        # Try to select a league opponent
+        if self.league.agents:
+            result = self.league.select_opponent(
+                training_agent.agent_id, training_team_id,
+            )
+            if result is not None:
+                league_agent, kind = result
+                if kind in ("pfsp", "self_play"):
+                    # Use frozen league opponent
+                    opponent_team_id = league_agent.team_id
+                    opponent_player = self._get_league_player(
+                        league_agent, opponent_team_id,
+                    )
+                    opponent_agent_id = league_agent.agent_id
+                    use_league = True
+                    logger.debug(
+                        f"League opponent: {league_agent.agent_id} ({kind})"
+                    )
+
+        if not use_league:
+            opponent_player = live_opponent_fn()
+            opponent_agent_id = live_agent.agent_id
 
         # Snapshot battle counts before this batch
-        p1_wins_before = player1.n_won_battles
-        p1_total_before = player1.n_finished_battles
+        tp_wins_before = training_player.n_won_battles
+        tp_total_before = training_player.n_finished_battles
 
-        await player1.battle_against(player2, n_battles=n_battles)
+        await training_player.battle_against(opponent_player, n_battles=n_battles)
 
         # Compute batch results
-        p1_wins_after = player1.n_won_battles
-        p1_total_after = player1.n_finished_battles
-        battles_played = p1_total_after - p1_total_before
-        batch_wins = p1_wins_after - p1_wins_before
+        tp_wins_after = training_player.n_won_battles
+        tp_total_after = training_player.n_finished_battles
+        battles_played = tp_total_after - tp_total_before
+        batch_wins = tp_wins_after - tp_wins_before
 
         # Process each completed battle
+        ko_w = self.config.ko_reward_weight
+        dmg_w = self.config.damage_reward_weight
+
         for i in range(battles_played):
-            p1_won = i < batch_wins  # approximate: first batch_wins were wins
+            tp_won = i < batch_wins  # approximate: first batch_wins were wins
 
-            p1_base = 1.0 if p1_won else -1.0
-            p2_base = -p1_base
+            tp_base = 1.0 if tp_won else -1.0
 
-            # Add KO differential bonus so even the losing side has
-            # variance in terminal reward (prevents gradient collapse
-            # in hopeless matchups).
-            ko_w = self.config.ko_reward_weight
-            dmg_w = self.config.damage_reward_weight
-            p1_reward = (
-                p1_base
-                + ko_w * player1.get_ko_differential()
-                + dmg_w * player1.get_damage_differential()
-            )
-            p2_reward = (
-                p2_base
-                + ko_w * player2.get_ko_differential()
-                + dmg_w * player2.get_damage_differential()
+            tp_reward = (
+                tp_base
+                + ko_w * training_player.get_ko_differential()
+                + dmg_w * training_player.get_damage_differential()
             )
 
-            # Apply reward shaping
-            self._apply_reward_shaping(player1, p1_reward)
-            self._apply_reward_shaping(player2, p2_reward)
+            # Apply reward shaping and finalize for training player
+            self._apply_reward_shaping(training_player, tp_reward)
+            training_player.on_battle_finished(tp_won, tp_reward)
 
-            # Finalize
-            player1.on_battle_finished(p1_won, p1_reward)
-            player2.on_battle_finished(not p1_won, p2_reward)
+            # If fighting the live opponent, also process their data
+            if not use_league:
+                opp_base = -tp_base
+                opp_reward = (
+                    opp_base
+                    + ko_w * opponent_player.get_ko_differential()
+                    + dmg_w * opponent_player.get_damage_differential()
+                )
+                self._apply_reward_shaping(opponent_player, opp_reward)
+                opponent_player.on_battle_finished(not tp_won, opp_reward)
 
-            # Store WP trajectories
+                # Store WP trajectory for live opponent too
+                self.wp_estimator.store_trajectory(
+                    opponent_player.get_battle_observations(), not tp_won,
+                )
+
+            # Store WP trajectory for training player
             self.wp_estimator.store_trajectory(
-                player1.get_battle_observations(), p1_won
-            )
-            self.wp_estimator.store_trajectory(
-                player2.get_battle_observations(), not p1_won
+                training_player.get_battle_observations(), tp_won,
             )
 
-            # Payoff
+            # Record payoff with correct agent IDs
             self.league.payoff.record_result(
-                self.agent1.agent_id, self.agent2.agent_id, p1_won
+                training_agent.agent_id, opponent_agent_id, tp_won,
             )
 
-            self.recent_results.append(p1_won)
+            # Track win rate from team1's perspective
+            if training_team_id == 0:
+                self.recent_results.append(tp_won)
+            else:
+                self.recent_results.append(not tp_won)
 
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
@@ -376,15 +528,31 @@ class Trainer:
             else:
                 buffer.steps[buf_idx].reward = surv
 
+    def _inject_param_noise(self):
+        """Inject small Gaussian noise into policy parameters to escape plateaus."""
+        import torch
+        noise_scale = 0.01
+        for agent in (self.agent1, self.agent2):
+            for param in agent.battle_net.parameters():
+                if param.requires_grad:
+                    param.data.add_(torch.randn_like(param.data) * noise_scale)
+
     def _update_agents(self):
         """Run PPO updates for both agents."""
         self.agent1.set_train()
         self.agent2.set_train()
 
-        metrics1 = self.agent1.update_battle_policy()
-        metrics2 = self.agent2.update_battle_policy()
-        self.agent1.update_preview_policy()
-        self.agent2.update_preview_policy()
+        ent_coef = self._get_effective_entropy_coef()
+
+        metrics1 = self.agent1.update_battle_policy(entropy_coef_override=ent_coef)
+        metrics2 = self.agent2.update_battle_policy(entropy_coef_override=ent_coef)
+        self.agent1.update_preview_policy(entropy_coef_override=ent_coef)
+        self.agent2.update_preview_policy(entropy_coef_override=ent_coef)
+
+        # Step LR schedulers
+        wr = self._recent_win_rate()
+        self.agent1.step_lr_scheduler(metric=wr)
+        self.agent2.step_lr_scheduler(metric=wr)
 
         if metrics1:
             self._latest_explained_variance = metrics1.get(
