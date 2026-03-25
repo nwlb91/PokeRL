@@ -64,6 +64,7 @@ class Trainer:
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
         self.greedy_eval_results: List[Tuple[int, float]] = []  # (battle_count, win_rate)
+        self.train_wr_history: List[Tuple[int, float]] = []  # (battle_count, win_rate)
         self._latest_explained_variance: float = 0.0
         self._latest_metrics: dict = {}  # most recent PPO metrics, updated each update
 
@@ -267,6 +268,7 @@ class Trainer:
                     self.plateau_detector,
                     self.metrics_history,
                     self.greedy_eval_results,
+                    self.train_wr_history,
                 )
 
         # Final checkpoint
@@ -457,6 +459,9 @@ class Trainer:
         if self.greedy_eval_results:
             _, last_greedy_wr = self.greedy_eval_results[-1]
             greedy_str = f" | Greedy WR: {last_greedy_wr:.1%}"
+
+        # Track training win rate history for GUI charting
+        self.train_wr_history.append((self.battle_count, wr))
 
         # Snapshot latest PPO metrics at the same rate as win rate logging
         if self._latest_metrics:

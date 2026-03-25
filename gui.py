@@ -516,7 +516,8 @@ class PokeRLApp(tk.Tk):
     def _on_progress_update(self, battle_count: int, total_battles: int,
                             plateau_detector: "PlateauDetector | None" = None,
                             metrics_history: "list | None" = None,
-                            greedy_eval_results: "list | None" = None):
+                            greedy_eval_results: "list | None" = None,
+                            train_wr_history: "list | None" = None):
         """Update progress bar, time labels, and training charts."""
         pct = battle_count / total_battles * 100 if total_battles else 0
         self.train_progress["value"] = pct
@@ -535,17 +536,21 @@ class PokeRLApp(tk.Tk):
             self.train_eta_var.set("ETA: --")
 
         # Update summary stat labels
-        self._update_stat_labels(metrics_history, greedy_eval_results)
+        self._update_stat_labels(metrics_history, greedy_eval_results, train_wr_history)
 
         # Update all training charts
-        self._update_training_charts(plateau_detector, metrics_history, greedy_eval_results)
+        self._update_training_charts(plateau_detector, metrics_history, greedy_eval_results, train_wr_history)
 
     def _update_stat_labels(self, metrics_history: "list | None",
-                            greedy_eval_results: "list | None"):
+                            greedy_eval_results: "list | None",
+                            train_wr_history: "list | None" = None):
         """Update the summary stat labels with latest values."""
         if greedy_eval_results:
             _, gwr = greedy_eval_results[-1]
             self.stat_greedy_wr_var.set(f"Greedy WR: {gwr:.1%}")
+        if train_wr_history:
+            _, twr = train_wr_history[-1]
+            self.stat_train_wr_var.set(f"Train WR: {twr:.1%}")
         if metrics_history:
             m = metrics_history[-1]
             self.stat_policy_loss_var.set(f"Policy Loss: {m['policy_loss']:.4f}")
@@ -556,7 +561,8 @@ class PokeRLApp(tk.Tk):
 
     def _update_training_charts(self, detector: "PlateauDetector | None",
                                 metrics_history: "list | None",
-                                greedy_eval_results: "list | None"):
+                                greedy_eval_results: "list | None",
+                                train_wr_history: "list | None" = None):
         """Redraw all four training charts."""
         ax_wr, ax_loss, ax_entropy, ax_ev = (
             self._axes[0, 0], self._axes[0, 1],
@@ -572,16 +578,17 @@ class PokeRLApp(tk.Tk):
         ax_wr.axhline(y=0.5, color="gray", linewidth=0.5, linestyle="--")
         ax_wr.tick_params(labelsize=7)
 
+        # Plot training win rate from dedicated history (updated every 50 battles)
+        if train_wr_history:
+            twr_battles = [r[0] for r in train_wr_history]
+            twr_values = [r[1] for r in train_wr_history]
+            ax_wr.plot(twr_battles, twr_values, color="#1f77b4", linewidth=1.5, label="Train WR")
+
+        # Shade plateau regions from detector
         if detector is not None:
-            wr_hist = detector._win_rates
             bc_hist = detector._battle_counts
+            wr_hist = detector._win_rates
             if wr_hist:
-                ax_wr.plot(bc_hist, wr_hist, color="#1f77b4", linewidth=1.5, label="Train WR")
-
-                # Update train WR label
-                self.stat_train_wr_var.set(f"Train WR: {wr_hist[-1]:.1%}")
-
-                # Shade plateau regions
                 regions = list(detector._plateau_regions)
                 if detector._in_plateau_since is not None:
                     regions.append((detector._in_plateau_since, len(wr_hist) - 1))
@@ -799,10 +806,12 @@ class PokeRLApp(tk.Tk):
         self.train_eta_var.set("ETA: --")
 
         def _progress_cb(battle_count, total_battles, plateau_detector=None,
-                         metrics_history=None, greedy_eval_results=None):
+                         metrics_history=None, greedy_eval_results=None,
+                         train_wr_history=None):
             self.after(0, lambda bc=battle_count, tb=total_battles, pd=plateau_detector,
-                              mh=metrics_history, ge=greedy_eval_results:
-                       self._on_progress_update(bc, tb, pd, mh, ge))
+                              mh=metrics_history, ge=greedy_eval_results,
+                              twh=train_wr_history:
+                       self._on_progress_update(bc, tb, pd, mh, ge, twh))
 
         def train_thread():
             try:
