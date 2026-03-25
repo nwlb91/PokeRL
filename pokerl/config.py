@@ -1,8 +1,45 @@
 """Global configuration for PokeRL training."""
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+_log = logging.getLogger(__name__)
+
+
+def resolve_device(requested: str) -> str:
+    """Validate the requested device and fall back to CPU with a clear message if needed.
+
+    Distinguishes between:
+      - PyTorch built without CUDA support (CPU-only wheel)
+      - CUDA build present but no compatible GPU / driver found
+    """
+    import torch
+
+    if requested != "cuda":
+        return requested
+
+    if torch.version.cuda is None:
+        _log.error(
+            "CUDA requested but your PyTorch installation was built without CUDA support.\n"
+            "Re-install PyTorch with CUDA enabled. For CUDA 12.1 run:\n"
+            "  pip install torch --index-url https://download.pytorch.org/whl/cu121\n"
+            "Other versions: https://pytorch.org/get-started/locally/\n"
+            "Falling back to CPU."
+        )
+        return "cpu"
+
+    if not torch.cuda.is_available():
+        _log.error(
+            "CUDA requested but no CUDA-capable GPU was detected.\n"
+            "Check that your Nvidia driver is installed and visible to PyTorch:\n"
+            "  nvidia-smi\n"
+            "Falling back to CPU."
+        )
+        return "cpu"
+
+    return "cuda"
 
 
 @dataclass

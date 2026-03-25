@@ -37,7 +37,7 @@ from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
 from pokerl.agent import PPOAgent
 from pokerl.checkpoint import CheckpointManager
-from pokerl.config import Config
+from pokerl.config import Config, resolve_device
 from pokerl.env import RLPlayer, create_player, load_team
 from pokerl.league import League
 from pokerl.plateau import PlateauDetector
@@ -581,7 +581,7 @@ class PokeRLApp(tk.Tk):
             total_battles=self.battles_var.get(),
             lr=self.lr_var.get(),
             hidden_size=self.hidden_var.get(),
-            device=self.device_var.get(),
+            device=resolve_device(self.device_var.get()),
             checkpoint_dir=self.output_var.get(),
             server_port=self.server_port_var.get(),
         )

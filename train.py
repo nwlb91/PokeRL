@@ -18,7 +18,7 @@ import asyncio
 import logging
 import sys
 
-from pokerl.config import Config
+from pokerl.config import Config, resolve_device
 from pokerl.trainer import Trainer
 
 
@@ -106,6 +106,8 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    args.device = resolve_device(args.device)
 
     # Build config
     config = Config(
