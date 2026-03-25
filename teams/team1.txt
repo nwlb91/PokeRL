@@ -1,0 +1,59 @@
+Dragonite @ Lum Berry
+Ability: Multiscale
+Tera Type: Normal
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Dragon Dance
+- Outrage
+- Extreme Speed
+- Earthquake
+
+Dragapult @ Choice Specs
+Ability: Infiltrator
+Tera Type: Dragon
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Shadow Ball
+- Draco Meteor
+- Fire Blast
+- U-turn
+
+Garchomp @ Rocky Helmet
+Ability: Rough Skin
+Tera Type: Dragon
+EVs: 252 HP / 4 Atk / 252 Def
+Impish Nature
+- Stealth Rock
+- Earthquake
+- Dragon Tail
+- Toxic
+
+Roaring Moon @ Booster Energy
+Ability: Protosynthesis
+Tera Type: Dragon
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Dragon Dance
+- Knock Off
+- Acrobatics
+- Earthquake
+
+Kyurem @ Heavy-Duty Boots
+Ability: Pressure
+Tera Type: Dragon
+EVs: 4 Atk / 252 SpA / 252 Spe
+Hasty Nature
+- Freeze-Dry
+- Draco Meteor
+- Earth Power
+- Ice Beam
+
+Latios @ Choice Scarf
+Ability: Levitate
+Tera Type: Dragon
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Draco Meteor
+- Psyshock
+- Trick
+- Healing Wish
