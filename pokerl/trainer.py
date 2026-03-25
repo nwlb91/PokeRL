@@ -65,8 +65,9 @@ class Trainer:
         self.recent_results = []  # list of (team1_won: bool)
         self.greedy_eval_results: List[Tuple[int, float]] = []  # (battle_count, win_rate)
         self._latest_explained_variance: float = 0.0
+        self._latest_metrics: dict = {}  # most recent PPO metrics, updated each update
 
-        # Training metrics history (populated after each PPO update)
+        # Training metrics history (sampled every 50 battles alongside win rate)
         self.metrics_history: List[dict] = []  # each entry keyed by metric name
 
         # Persistent players — reused across battles to avoid reconnections
@@ -386,14 +387,13 @@ class Trainer:
             self._latest_explained_variance = metrics1.get(
                 'explained_variance', 0.0
             )
-            self.metrics_history.append({
-                'battle_count': self.battle_count,
+            self._latest_metrics = {
                 'policy_loss': metrics1.get('policy_loss', 0.0),
                 'value_loss': metrics1.get('value_loss', 0.0),
                 'entropy': metrics1.get('entropy', 0.0),
                 'explained_variance': metrics1.get('explained_variance', 0.0),
                 'mean_episode_return': metrics1.get('mean_episode_return', 0.0),
-            })
+            }
             msg = (
                 f"  Agent1 battle update: "
                 f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
@@ -457,6 +457,14 @@ class Trainer:
         if self.greedy_eval_results:
             _, last_greedy_wr = self.greedy_eval_results[-1]
             greedy_str = f" | Greedy WR: {last_greedy_wr:.1%}"
+
+        # Snapshot latest PPO metrics at the same rate as win rate logging
+        if self._latest_metrics:
+            self.metrics_history.append({
+                'battle_count': self.battle_count,
+                **self._latest_metrics,
+            })
+
         logger.info(
             f"Battle {self.battle_count}/{self.config.total_battles} | "
             f"Team1 recent WR: {wr:.1%}{greedy_str} | "
