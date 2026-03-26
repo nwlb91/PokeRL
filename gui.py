@@ -741,28 +741,62 @@ class PokeRLApp(tk.Tk):
             return
 
         try:
-            cmd = [node, str(ps_main), "start", "--no-security", f"--port={port}"]
-            # Set NODE_OPTIONS to limit heap size for the esbuild step,
-            # preventing out-of-memory crashes during the Showdown build.
-            env = os.environ.copy()
-            env.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
-            self._showdown_proc = subprocess.Popen(
-                cmd,
+            self.btn_start_server.config(state="disabled")
+            # Build and start in a background thread so the GUI stays responsive.
+            threading.Thread(
+                target=self._build_and_start_server,
+                args=(node, str(ps_main), sd_path, port),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            self.btn_start_server.config(state="normal")
+            messagebox.showerror("Error", f"Failed to start server: {e}")
+
+    def _build_and_start_server(self, node: str, ps_main: str, sd_path: str, port: int):
+        """Build Showdown (if needed) then start the server.
+
+        Separating build from start prevents esbuild's Go runtime from
+        competing for memory with the running Node.js server process.
+        """
+        # Check whether a build is needed (.server-dist is Showdown's build output)
+        server_dist = Path(sd_path) / ".server-dist"
+        needs_build = not server_dist.exists()
+
+        if needs_build:
+            self._log("Building Pokemon Showdown (first run)...")
+            build_result = subprocess.run(
+                [node, ps_main, "build"],
                 cwd=sd_path,
-                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            self._log(f"Starting Showdown server (PID {self._showdown_proc.pid}) on port {port}...")
-            self.server_status_var.set(f"Server: running (PID {self._showdown_proc.pid})")
-            self.btn_start_server.config(state="disabled")
-            self.btn_stop_server.config(state="normal")
+            if build_result.returncode != 0:
+                self._log(f"[showdown] Build output:\n{build_result.stdout}")
+                self._log("ERROR: Showdown build failed. Try running 'node pokemon-showdown build' manually.")
+                self.after(0, lambda: self.btn_start_server.config(state="normal"))
+                return
+            self._log("Build completed successfully.")
 
-            # Stream server output in background
-            threading.Thread(target=self._stream_server_output, daemon=True).start()
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to start server: {e}")
+        # Start with --no-build so the server process doesn't re-invoke esbuild.
+        cmd = [node, ps_main, "start", "--no-security", "--no-build", f"--port={port}"]
+        self._showdown_proc = subprocess.Popen(
+            cmd,
+            cwd=sd_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        self._log(f"Starting Showdown server (PID {self._showdown_proc.pid}) on port {port}...")
+        self.after(0, self._server_started)
+
+        # Stream server output
+        self._stream_server_output()
+
+    def _server_started(self):
+        if self._showdown_proc:
+            self.server_status_var.set(f"Server: running (PID {self._showdown_proc.pid})")
+            self.btn_stop_server.config(state="normal")
 
     def _stream_server_output(self):
         proc = self._showdown_proc
