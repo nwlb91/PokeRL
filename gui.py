@@ -758,14 +758,15 @@ class PokeRLApp(tk.Tk):
         Separating build from start prevents esbuild's Go runtime from
         competing for memory with the running Node.js server process.
         """
-        # Check whether a build is needed (.server-dist is Showdown's build output)
-        server_dist = Path(sd_path) / ".server-dist"
-        needs_build = not server_dist.exists()
+        # Check whether a build is needed (dist/ is Showdown's esbuild output)
+        dist_dir = Path(sd_path) / "dist"
+        needs_build = not dist_dir.exists()
 
         if needs_build:
             self._log("Building Pokemon Showdown (first run)...")
+            build_script = Path(sd_path) / "build"
             build_result = subprocess.run(
-                [node, ps_main, "build"],
+                [node, str(build_script)],
                 cwd=sd_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -773,13 +774,13 @@ class PokeRLApp(tk.Tk):
             )
             if build_result.returncode != 0:
                 self._log(f"[showdown] Build output:\n{build_result.stdout}")
-                self._log("ERROR: Showdown build failed. Try running 'node pokemon-showdown build' manually.")
+                self._log("ERROR: Showdown build failed. Try running 'node build' in the pokemon-showdown directory manually.")
                 self.after(0, lambda: self.btn_start_server.config(state="normal"))
                 return
             self._log("Build completed successfully.")
 
-        # Start with --no-build so the server process doesn't re-invoke esbuild.
-        cmd = [node, ps_main, "start", "--no-security", "--no-build", f"--port={port}"]
+        # Start with --skip-build so the server process doesn't re-invoke esbuild.
+        cmd = [node, ps_main, "start", "--no-security", "--skip-build", f"--port={port}"]
         self._showdown_proc = subprocess.Popen(
             cmd,
             cwd=sd_path,
