@@ -489,6 +489,9 @@ class PokeRLApp(tk.Tk):
     def _log(self, msg: str):
         logger.info(msg)
 
+    _LOG_MAX_LINES = 10_000
+    _LOG_TRIM_LINES = 1_000
+
     def _poll_log_queue(self):
         """Drain the log queue into the ScrolledText widget (max 20 msgs per tick)."""
         try:
@@ -500,6 +503,12 @@ class PokeRLApp(tk.Tk):
                 self.log_text.configure(state="disabled")
         except queue.Empty:
             pass
+        # Trim excess lines to prevent unbounded memory growth
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > self._LOG_MAX_LINES:
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", f"{self._LOG_TRIM_LINES}.0")
+            self.log_text.configure(state="disabled")
         self.after(100, self._poll_log_queue)
 
     @staticmethod
@@ -657,9 +666,11 @@ class PokeRLApp(tk.Tk):
                         color="#2ca02c", linewidth=1.2)
 
         # --- Bottom-right: Explained Variance & Episode Return ---
-        # Remove any previous twin axis before recreating
-        if hasattr(self, '_ax_return_twin'):
-            self._ax_return_twin.remove()
+        # Reuse twin axis to avoid matplotlib memory leak from repeated twinx()
+        if not hasattr(self, '_ax_return_twin'):
+            self._ax_return_twin = ax_ev.twinx()
+        else:
+            self._ax_return_twin.clear()
         ax_ev.clear()
         ax_ev.set_title("Value Quality", fontsize=9, fontweight="bold")
         ax_ev.set_xlabel("Battle", fontsize=8)
@@ -673,7 +684,6 @@ class PokeRLApp(tk.Tk):
         ax_ev.set_ylim(-0.1, 1.1)
 
         # Secondary y-axis for mean episode return
-        self._ax_return_twin = ax_ev.twinx()
         color_ret = "#ff7f0e"
         self._ax_return_twin.set_ylabel("Ep. Return", fontsize=8, color=color_ret)
         self._ax_return_twin.plot(battles, [m['mean_episode_return'] for m in metrics_history],

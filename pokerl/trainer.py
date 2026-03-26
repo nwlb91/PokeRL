@@ -13,6 +13,7 @@ import asyncio
 import logging
 import random
 import time
+from collections import deque
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -64,13 +65,13 @@ class Trainer:
 
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
-        self.greedy_eval_results: List[Tuple[int, float]] = []  # (battle_count, win_rate)
-        self.train_wr_history: List[Tuple[int, float]] = []  # (battle_count, win_rate)
+        self.greedy_eval_results: deque = deque(maxlen=5000)  # (battle_count, win_rate)
+        self.train_wr_history: deque = deque(maxlen=5000)  # (battle_count, win_rate)
         self._latest_explained_variance: float = 0.0
         self._latest_metrics: dict = {}  # most recent PPO metrics, updated each update
 
         # Training metrics history (sampled every 50 battles alongside win rate)
-        self.metrics_history: List[dict] = []  # each entry keyed by metric name
+        self.metrics_history: deque = deque(maxlen=5000)  # each entry keyed by metric name
 
         # Persistent players — reused across battles to avoid reconnections
         self._player1: Optional[RLPlayer] = None
