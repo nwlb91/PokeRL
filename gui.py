@@ -742,9 +742,14 @@ class PokeRLApp(tk.Tk):
 
         try:
             cmd = [node, str(ps_main), "start", "--no-security", f"--port={port}"]
+            # Set NODE_OPTIONS to limit heap size for the esbuild step,
+            # preventing out-of-memory crashes during the Showdown build.
+            env = os.environ.copy()
+            env.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
             self._showdown_proc = subprocess.Popen(
                 cmd,
                 cwd=sd_path,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
