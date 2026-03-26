@@ -64,9 +64,12 @@ class WinProbabilityEstimator:
             return self.net(obs_t).item()
 
     def compute_shaped_rewards_batch(
-        self, observations: List[np.ndarray]
+        self, observations: List[np.ndarray], gamma: float = 0.99
     ) -> np.ndarray:
         """Compute WP-delta shaped rewards for a full trajectory at once.
+
+        Uses proper potential-based reward shaping: gamma * phi(s') - phi(s),
+        which preserves the optimal policy under discounting.
 
         Returns:
             (N-1,) array of shaped rewards for steps 0..N-2.
@@ -80,9 +83,8 @@ class WinProbabilityEstimator:
         obs_stack = np.array(observations, dtype=np.float32)
         wp = self.predict_batch(obs_stack)
 
-        # wp_delta[i] = wp[i+1] - wp[i]
-        wp_delta = wp[1:] - wp[:-1]
-        # shaped = (1-w)*0 + w*delta = w*delta  (terminal_reward=0 for mid-steps)
+        # Proper PBRS: gamma * phi(s') - phi(s)
+        wp_delta = gamma * wp[1:] - wp[:-1]
         return (w * wp_delta).astype(np.float32)
 
     def store_trajectory(self, observations: List[np.ndarray], won: bool):

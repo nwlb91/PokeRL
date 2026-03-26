@@ -7,6 +7,7 @@ Manages:
   - Win probability reward shaping integration
 """
 
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,6 +15,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 from pokerl.config import Config
 from pokerl.models import PolicyValueNet, TeamPreviewNet
@@ -121,8 +124,9 @@ class PPOAgent:
                 import triton  # noqa: F401
                 self.battle_net = torch.compile(self.battle_net)
                 self.preview_net = torch.compile(self.preview_net)
-            except Exception:
-                pass  # graceful fallback (triton not available)
+                logger.info("torch.compile enabled for battle and preview networks")
+            except (ImportError, RuntimeError) as e:
+                logger.debug("torch.compile unavailable, using eager mode: %s", e)
 
         # Optimizers
         self.battle_optimizer = optim.Adam(
@@ -147,24 +151,45 @@ class PPOAgent:
         self.losses = 0
 
     def _create_lr_scheduler(self, optimizer: optim.Optimizer):
-        """Create an LR scheduler based on config."""
+        """Create an LR scheduler based on config, with optional linear warmup."""
         cfg = self.config
+
+        # Estimate warmup length in optimizer steps.
+        # Each PPO update processes ~rollout_steps / batch_size mini-batches,
+        # and one update fires per ~rollout_steps / avg_episode_len battles.
+        # Approximate: 1 update per battle (conservative).
+        warmup_steps = max(1, cfg.lr_warmup_battles) if cfg.lr_warmup_battles > 0 else 0
+
         if cfg.lr_schedule == "cosine":
             # Use warm restarts for infinite training compatibility.
             # T_0 = estimated updates per entropy_anneal_battles cycle,
             # falling back to a reasonable default.
             updates_per_battle = 1.0 / max(1, cfg.rollout_steps // cfg.batch_size)
             t_0 = max(10, int(10000 * updates_per_battle))
-            return optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            main_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 optimizer, T_0=t_0, eta_min=cfg.lr_min,
             )
         elif cfg.lr_schedule == "reduce_on_plateau":
-            return optim.lr_scheduler.ReduceLROnPlateau(
+            main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode="max", patience=10, factor=0.5,
                 min_lr=cfg.lr_min,
             )
-        # "constant" — no scheduler
-        return None
+        else:
+            # "constant" — no main scheduler
+            main_scheduler = None
+
+        if warmup_steps > 0 and main_scheduler is not None:
+            warmup_scheduler = optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1e-2, end_factor=1.0,
+                total_iters=warmup_steps,
+            )
+            return optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, main_scheduler],
+                milestones=[warmup_steps],
+            )
+
+        return main_scheduler
 
     def step_lr_scheduler(self, metric: Optional[float] = None):
         """Step the LR schedulers after a PPO update."""
@@ -319,10 +344,9 @@ class PPOAgent:
                 values_clipped = old_val_t + torch.clamp(
                     values - old_val_t, -cfg.clip_eps, cfg.clip_eps
                 )
-                value_loss = torch.max(
-                    F.mse_loss(values, returns_t),
-                    F.mse_loss(values_clipped, returns_t),
-                )
+                vl_unclipped = (values - returns_t) ** 2
+                vl_clipped = (values_clipped - returns_t) ** 2
+                value_loss = 0.5 * torch.max(vl_unclipped, vl_clipped).mean()
 
                 # Entropy bonus
                 entropy_loss = -entropy.mean()

@@ -475,7 +475,7 @@ class Trainer:
             )
 
             # Apply reward shaping and finalize for training player
-            self._apply_reward_shaping(training_player, tp_reward)
+            self._apply_reward_shaping(training_player)
             training_player.on_battle_finished(tp_won, tp_reward)
 
             # If fighting the live opponent, also process their data
@@ -486,7 +486,7 @@ class Trainer:
                     + ko_w * opponent_player.get_ko_differential()
                     + dmg_w * opponent_player.get_damage_differential()
                 )
-                self._apply_reward_shaping(opponent_player, opp_reward)
+                self._apply_reward_shaping(opponent_player)
                 opponent_player.on_battle_finished(not tp_won, opp_reward)
 
                 # Store WP trajectory for live opponent too
@@ -513,7 +513,7 @@ class Trainer:
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
 
-    def _apply_reward_shaping(self, player: RLPlayer, terminal_reward: float):
+    def _apply_reward_shaping(self, player: RLPlayer):
         """Apply vectorized win probability reward shaping."""
         observations = player.get_battle_observations()
         buffer = player.agent.battle_buffer
@@ -521,8 +521,10 @@ class Trainer:
         if len(observations) < 2:
             return
 
-        # Batch-predict all WP deltas in one forward pass
-        shaped_rewards = self.wp_estimator.compute_shaped_rewards_batch(observations)
+        # Batch-predict all WP deltas in one forward pass (proper PBRS with gamma)
+        shaped_rewards = self.wp_estimator.compute_shaped_rewards_batch(
+            observations, gamma=self.config.gamma
+        )
 
         # Walk backwards to find un-done steps from current episode
         steps_to_shape = []
