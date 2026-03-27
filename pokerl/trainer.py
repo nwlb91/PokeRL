@@ -64,6 +64,7 @@ class Trainer:
 
         # Battle counter
         self.battle_count = 0
+        self._batch_counter = 0  # alternates which agent trains vs league
 
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
@@ -662,7 +663,10 @@ class Trainer:
         """
         # Decide which training player and opponent to use this batch.
         # Alternate which agent gets league exposure each batch.
-        if self.battle_count % 2 == 0:
+        # Uses a dedicated counter (not battle_count) because batch_size > 1
+        # can make battle_count skip odd values entirely.
+        self._batch_counter += 1
+        if self._batch_counter % 2 == 0:
             training_player_fn = self._get_or_create_player1
             live_opponent_fn = self._get_or_create_player2
             training_agent = self.agent1

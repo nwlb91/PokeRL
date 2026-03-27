@@ -108,6 +108,9 @@ class PokeRLApp(tk.Tk):
         qh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
         logging.getLogger().addHandler(qh)
         logging.getLogger().setLevel(logging.INFO)
+        # Silence poke-env's per-message WebSocket logging — it floods the
+        # GUI log when running many concurrent battles.
+        logging.getLogger("poke_env").setLevel(logging.WARNING)
 
         # Tkinter variables
         self.team1_var = tk.StringVar(value="teams/team1.txt")
