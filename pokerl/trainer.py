@@ -805,6 +805,23 @@ class Trainer:
             steps_to_shape.append(i)
         steps_to_shape.reverse()
 
+        # Validate alignment between observations, shaped rewards, and buffer steps
+        if len(shaped_rewards) == 0:
+            logger.debug(
+                "Reward shaping produced 0 shaped rewards from %d observations; "
+                "skipping shaping for this episode.",
+                len(observations),
+            )
+
+        if len(steps_to_shape) != len(shaped_rewards):
+            logger.warning(
+                "Reward shaping mismatch: %d buffer steps vs %d shaped rewards "
+                "(from %d observations). Applying what we can.",
+                len(steps_to_shape),
+                len(shaped_rewards),
+                len(observations),
+            )
+
         # Apply shaped rewards with survival bonus so the losing side
         # receives a small positive per-turn signal even when WP deltas
         # are near zero (prevents gradient starvation in 100-0 matchups).

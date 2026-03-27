@@ -271,3 +271,21 @@ def embed_team_preview(battle: Battle) -> np.ndarray:
 # Precompute sizes
 BATTLE_OBS_SIZE = 1032
 TEAM_PREVIEW_OBS_SIZE = 664  # 330 our team + 330 opp team + 1 gen + 3 reserved
+
+# Runtime checks: ensure hardcoded constants cover all enum values.
+# If poke-env adds new types/statuses/etc., these will catch the mismatch.
+assert NUM_TYPES >= max(t.value for t in PokemonType if t.value > 0), (
+    f"NUM_TYPES ({NUM_TYPES}) is smaller than the largest PokemonType value"
+)
+assert NUM_STATUSES >= len(Status), (
+    f"NUM_STATUSES ({NUM_STATUSES}) < len(Status) ({len(Status)})"
+)
+assert NUM_WEATHERS >= len(Weather), (
+    f"NUM_WEATHERS ({NUM_WEATHERS}) < len(Weather) ({len(Weather)})"
+)
+assert NUM_FIELDS >= len(Field), (
+    f"NUM_FIELDS ({NUM_FIELDS}) < len(Field) ({len(Field)})"
+)
+assert NUM_SIDE_CONDITIONS >= len(SideCondition), (
+    f"NUM_SIDE_CONDITIONS ({NUM_SIDE_CONDITIONS}) < len(SideCondition) ({len(SideCondition)})"
+)

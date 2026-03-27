@@ -242,8 +242,21 @@ class RLPlayer(Player):
 
 def load_team(path: str) -> str:
     """Load a team from a text file in Showdown format."""
-    with open(path, "r") as f:
-        return f.read().strip()
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"Team file not found: {path!r}. "
+            "Please provide a valid path to a Showdown-format team file."
+        )
+    if not p.is_file():
+        raise ValueError(f"Team path is not a file: {path!r}")
+
+    text = p.read_text().strip()
+    if not text:
+        raise ValueError(f"Team file is empty: {path!r}")
+    return text
 
 
 def create_player(

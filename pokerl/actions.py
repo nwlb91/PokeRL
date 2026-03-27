@@ -11,6 +11,8 @@ Handles the full action space including:
 Also handles team preview lead selection (indices 0-5).
 """
 
+import logging
+
 import numpy as np
 
 from poke_env.battle.battle import Battle
@@ -21,6 +23,8 @@ from poke_env.player.battle_order import (
 from poke_env.player.player import Player
 
 from pokerl.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 def get_action_mask(battle: Battle, config: Config) -> np.ndarray:
@@ -92,6 +96,12 @@ def get_action_mask(battle: Battle, config: Config) -> np.ndarray:
 
     # If nothing is legal (shouldn't happen), default to first action
     if mask.sum() == 0:
+        logger.warning(
+            "Action mask is all zeros — no legal actions detected. "
+            "Falling back to action 0. This may indicate a bug in "
+            "battle state reading (turn %d).",
+            battle.turn,
+        )
         mask[0] = 1.0
 
     return mask

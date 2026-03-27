@@ -43,21 +43,24 @@ logger = logging.getLogger("pokerl.gui")
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_thread: Optional[threading.Thread] = None
+_loop_lock = threading.Lock()
 
 
 def _ensure_event_loop():
     global _loop, _loop_thread
-    if _loop is not None and _loop.is_running():
-        return
-    _loop = asyncio.new_event_loop()
-    _loop_thread = threading.Thread(target=_loop.run_forever, daemon=True)
-    _loop_thread.start()
+    with _loop_lock:
+        if _loop is not None and _loop.is_running():
+            return
+        _loop = asyncio.new_event_loop()
+        _loop_thread = threading.Thread(target=_loop.run_forever, daemon=True)
+        _loop_thread.start()
 
 
 def run_async(coro):
     """Schedule *coro* on the background event loop, return a Future."""
     _ensure_event_loop()
-    return asyncio.run_coroutine_threadsafe(coro, _loop)
+    with _loop_lock:
+        return asyncio.run_coroutine_threadsafe(coro, _loop)
 
 
 # ---------------------------------------------------------------------------

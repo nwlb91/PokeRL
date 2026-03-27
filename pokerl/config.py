@@ -4,6 +4,20 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+def _check_positive(name: str, value, allow_zero: bool = False):
+    if allow_zero:
+        if value < 0:
+            raise ValueError(f"{name} must be >= 0, got {value}")
+    else:
+        if value <= 0:
+            raise ValueError(f"{name} must be > 0, got {value}")
+
+
+def _check_range(name: str, value, lo: float, hi: float):
+    if not (lo <= value <= hi):
+        raise ValueError(f"{name} must be in [{lo}, {hi}], got {value}")
+
+
 @dataclass
 class Config:
     # --- Teams ---
@@ -108,6 +122,30 @@ class Config:
     # --- Showdown server ---
     server_url: str = "localhost"
     server_port: int = 8000
+
+    def __post_init__(self):
+        _check_positive("lr", self.lr)
+        _check_positive("lr_min", self.lr_min, allow_zero=True)
+        _check_range("gamma", self.gamma, 0.0, 1.0)
+        _check_range("gae_lambda", self.gae_lambda, 0.0, 1.0)
+        _check_range("clip_eps", self.clip_eps, 0.0, 1.0)
+        _check_positive("entropy_coef", self.entropy_coef, allow_zero=True)
+        _check_positive("value_coef", self.value_coef)
+        _check_positive("max_grad_norm", self.max_grad_norm)
+        _check_positive("ppo_epochs", self.ppo_epochs)
+        _check_positive("batch_size", self.batch_size)
+        _check_positive("rollout_steps", self.rollout_steps)
+        _check_positive("hidden_size", self.hidden_size)
+        _check_positive("num_layers", self.num_layers)
+        _check_positive("total_battles", self.total_battles)
+        _check_range("main_agent_fraction", self.main_agent_fraction, 0.0, 1.0)
+        _check_range("pfsp_fraction", self.pfsp_fraction, 0.0, 1.0)
+        _check_range("self_play_fraction", self.self_play_fraction, 0.0, 1.0)
+        if self.lr_schedule not in ("constant", "cosine", "reduce_on_plateau"):
+            raise ValueError(
+                f"lr_schedule must be 'constant', 'cosine', or 'reduce_on_plateau', "
+                f"got {self.lr_schedule!r}"
+            )
 
     @property
     def gen(self) -> int:
