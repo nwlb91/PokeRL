@@ -6,9 +6,9 @@ Implements a simplified version of AlphaStar's league training:
    against each other and against historical league opponents.
 
 2. **League**: A pool of frozen agent checkpoints. Snapshots are admitted
-   when they demonstrate sufficient *strength* (high win rate), *exploit*
-   the opposing team's best agent, or offer *novel parameters* while
-   maintaining a minimum strength floor.
+   when they demonstrate *relative strength* (outperform same-team average),
+   *exploit* the opposing team's best agent better than the team average,
+   or offer *novel parameters* while at least matching the team average.
 
 3. **Payoff Matrix**: Tracks EMA (exponential moving average) win rates
    between all pairs of agents, used for Prioritized Fictitious Self-Play
@@ -124,11 +124,13 @@ class PayoffMatrix:
 class League:
     """AlphaStar-style league for training diverse agents.
 
-    Agents are admitted when they are strong (high win rate), exploit the
-    opposing team's best agent, or offer novel parameters above a strength
-    floor.  Redundant agents (parameter-similar to a stronger member) and
-    stale agents (dominated by all live agents, unless they uniquely exploit
-    another league member) are periodically pruned.
+    Agents are admitted when they outperform their team's historical average
+    (relative strength), exploit the opposing best agent better than the
+    team average, or offer novel parameters while at least matching the team
+    average.  All thresholds are relative so asymmetric matchups don't bias
+    admission.  Redundant agents (parameter-similar to a stronger member) and
+    stale agents (dominated by all live agents well above average, unless
+    they uniquely exploit another league member) are periodically pruned.
     """
 
     def __init__(self, config: Config):
@@ -151,13 +153,20 @@ class League:
         """Snapshot a training agent and add it to the league *if* it passes
         the admission gate.
 
+        All thresholds are **relative** to the team's own history so that
+        asymmetric matchups (where one team has a structural WR advantage)
+        don't bias admission.
+
         Admission is granted when any of the following hold:
         - The team has fewer agents than ``league_min_size // 2`` (cold start).
-        - The agent is strong: ``current_win_rate >= league_admit_min_win_rate``.
-        - The agent exploits the opposing team's best agent:
-          ``exploit_win_rate >= league_admit_exploit_wr``.
+        - The agent is relatively strong: its win rate exceeds the mean WR
+          of existing same-team league agents by ``league_admit_win_rate_delta``.
+        - The agent is a relatively strong exploiter: its WR against the
+          opposing team's best agent exceeds the team's mean exploit WR by
+          ``league_admit_win_rate_delta``.
         - The agent's parameters are novel (relative L2 ≥
-          ``league_admit_param_novelty``) AND its win rate is at least 0.50.
+          ``league_admit_param_novelty``) AND its win rate is at least as
+          high as the team's mean WR.
 
         Args:
             agent: The live training agent to snapshot.
@@ -176,17 +185,22 @@ class League:
         if len(team_agents) < self.config.league_min_size // 2:
             return self._admit_agent(agent, team_id, current_win_rate)
 
-        # Gate 1: Strength — agent performs well overall
-        if current_win_rate >= self.config.league_admit_min_win_rate:
+        delta = self.config.league_admit_win_rate_delta
+        mean_wr = self._team_mean_win_rate(team_agents)
+
+        # Gate 1: Relative strength — agent outperforms its team's average
+        if current_win_rate >= mean_wr + delta:
             return self._admit_agent(agent, team_id, current_win_rate)
 
-        # Gate 2: Exploitation — agent beats the opposing best agent
-        if (exploit_win_rate is not None
-                and exploit_win_rate >= self.config.league_admit_exploit_wr):
-            return self._admit_agent(agent, team_id, current_win_rate)
+        # Gate 2: Relative exploitation — agent exploits the best opposing
+        # agent better than its team's historical average against that agent
+        if exploit_win_rate is not None:
+            mean_exploit = self._team_mean_exploit_wr(team_agents)
+            if exploit_win_rate >= mean_exploit + delta:
+                return self._admit_agent(agent, team_id, current_win_rate)
 
-        # Gate 3: Parameter novelty with a strength floor
-        if current_win_rate >= 0.50:
+        # Gate 3: Parameter novelty with a relative strength floor
+        if current_win_rate >= mean_wr:
             candidate_state = agent.get_state_dict()
             min_dist = self._min_param_distance(candidate_state, team_agents)
             if min_dist >= self.config.league_admit_param_novelty:
@@ -196,11 +210,58 @@ class League:
 
         logger.debug(
             f"League admission denied for team {team_id}: "
-            f"wr={current_win_rate:.4f} (need {self.config.league_admit_min_win_rate}), "
-            f"exploit_wr={exploit_win_rate}, "
+            f"wr={current_win_rate:.4f} (team_mean={mean_wr:.4f}, "
+            f"need +{delta}), exploit_wr={exploit_win_rate}, "
             f"param_novelty={min_dist:.4f} (need {self.config.league_admit_param_novelty})"
         )
         return None
+
+    def _team_mean_win_rate(self, team_agents: List[LeagueAgent]) -> float:
+        """Mean win_rate_at_snapshot for a list of team agents."""
+        if not team_agents:
+            return 0.5
+        return sum(a.win_rate_at_snapshot for a in team_agents) / len(team_agents)
+
+    def _team_mean_exploit_wr(self, team_agents: List[LeagueAgent]) -> float:
+        """Mean payoff WR of *team_agents* against the opposing team's best agent.
+
+        Returns 0.5 when there is insufficient data.
+        """
+        # Find the opposing best agent
+        if not team_agents:
+            return 0.5
+        opp_team = 1 - team_agents[0].team_id
+        best_agents = [a for a in self.agents if a.team_id == opp_team and a.is_best]
+        if not best_agents:
+            return 0.5
+        best = best_agents[-1]
+
+        wrs = []
+        for a in team_agents:
+            _, total = self.payoff._records.get(
+                (a.agent_id, best.agent_id), (0.5, 0)
+            )
+            if total > 0:
+                wrs.append(self.payoff.get_win_rate(a.agent_id, best.agent_id))
+        return sum(wrs) / len(wrs) if wrs else 0.5
+
+    def _live_mean_wr_vs_team(self, live_id: str, team_id: int,
+                               exclude: set) -> float:
+        """Mean payoff WR of a live agent against all league agents of *team_id*.
+
+        Used to compute the baseline for relative staleness checks.
+        """
+        team_agents = [
+            a for a in self.agents
+            if a.team_id == team_id and a.agent_id not in exclude
+        ]
+        if not team_agents:
+            return 0.5
+        wrs = [
+            self.payoff.get_win_rate(live_id, a.agent_id)
+            for a in team_agents
+        ]
+        return sum(wrs) / len(wrs)
 
     def _admit_agent(self, agent: PPOAgent, team_id: int,
                      win_rate: float) -> str:
@@ -367,10 +428,11 @@ class League:
            parameter distance is below ``league_prune_similarity``, the
            lower-quality agent is removed.
 
-        2. **Staleness**: Agents that both live agents dominate (payoff EMA
-           ≥ ``league_prune_stale_wr``) are removed — *unless* the agent is
-           the strongest exploiter of some other league member (it uniquely
-           provides training signal).
+        2. **Staleness**: Agents that both live agents beat by at least
+           ``league_prune_stale_margin`` above their average WR against the
+           agent's team are removed — *unless* the agent is the strongest
+           exploiter of some other league member (it uniquely provides
+           training signal).
 
         The most recent agent per team and ``is_best``-tagged agents are
         always protected.
@@ -401,19 +463,30 @@ class League:
                             to_remove.add(agent.agent_id)
                             break
 
-        # Pass 2: Staleness-based pruning
+        # Pass 2: Staleness-based pruning (relative to team average)
+        # An agent is stale when every live agent beats it by a large margin
+        # above the live agent's average WR against that team.
         if self.live_agent_ids:
-            stale_wr = self.config.league_prune_stale_wr
+            margin = self.config.league_prune_stale_margin
             for agent in self.agents:
                 if (agent.agent_id in protected or agent.is_best
                         or agent.agent_id in to_remove):
                     continue
 
                 # Check if all live agents dominate this league agent
-                dominated = all(
-                    self.payoff.get_win_rate(live_id, agent.agent_id) >= stale_wr
-                    for live_id in self.live_agent_ids
-                )
+                # relative to their average WR against the agent's team
+                dominated = True
+                for live_id in self.live_agent_ids:
+                    mean_wr = self._live_mean_wr_vs_team(
+                        live_id, agent.team_id, exclude=to_remove,
+                    )
+                    wr_vs_agent = self.payoff.get_win_rate(
+                        live_id, agent.agent_id,
+                    )
+                    if wr_vs_agent < mean_wr + margin:
+                        dominated = False
+                        break
+
                 if not dominated:
                     continue
 
@@ -428,7 +501,7 @@ class League:
                 to_remove.add(agent.agent_id)
                 logger.debug(
                     f"Stale agent {agent.agent_id} marked for removal "
-                    f"(dominated by all live agents)"
+                    f"(dominated by all live agents, margin={margin})"
                 )
 
         # Never prune below minimum size

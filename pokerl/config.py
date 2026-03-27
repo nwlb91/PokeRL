@@ -77,9 +77,7 @@ class Config:
     league_admit_param_novelty: float = 0.05  # min relative param distance for admission
     league_prune_interval: int = 200  # battles between pruning passes
     league_prune_similarity: float = 0.02  # relative param distance below which agents are redundant
-    league_admit_min_win_rate: float = 0.55  # min WR for strength-based league admission
-    league_admit_exploit_wr: float = 0.55  # min WR vs best agent for exploit-based admission
-    league_prune_stale_wr: float = 0.85  # live agents beat league agent at this rate → stale
+    league_prune_stale_margin: float = 0.20  # WR margin above team average at which a league agent is stale
     payoff_decay: float = 0.995  # EMA decay factor for payoff matrix records
 
     # --- Uncertainty-weighted exploration ---
