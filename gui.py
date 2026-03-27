@@ -122,6 +122,7 @@ class PokeRLApp(tk.Tk):
         self.device_var = tk.StringVar(value="cpu")
         self.server_port_var = tk.IntVar(value=8000)
         self.showdown_path_var = tk.StringVar(value="pokemon-showdown")
+        self.concurrent_battles_var = tk.IntVar(value=4)
         self.eval_n_battles_var = tk.IntVar(value=50)
 
         # Challenge tab variables
@@ -207,6 +208,8 @@ class PokeRLApp(tk.Tk):
         row = 2
         ttk.Label(hyper, text="Hidden size:").grid(row=row, column=0, sticky="e", **PADDING)
         ttk.Entry(hyper, textvariable=self.hidden_var, width=12).grid(row=row, column=1, sticky="w", **PADDING)
+        ttk.Label(hyper, text="Concurrent battles:").grid(row=row, column=2, sticky="e", **PADDING)
+        ttk.Spinbox(hyper, textvariable=self.concurrent_battles_var, from_=1, to=64, width=8).grid(row=row, column=3, sticky="w", **PADDING)
 
         # --- Controls ---
         ctrl = ttk.Frame(parent)
@@ -742,6 +745,7 @@ class PokeRLApp(tk.Tk):
             device=self.device_var.get(),
             checkpoint_dir=self.output_var.get(),
             server_port=self.server_port_var.get(),
+            num_parallel_battles=self.concurrent_battles_var.get(),
         )
         ckpt = self.checkpoint_var.get().strip()
         if ckpt:
