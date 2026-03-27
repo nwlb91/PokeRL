@@ -532,7 +532,8 @@ class PokeRLApp(tk.Tk):
                             metrics_history: "list | None" = None,
                             greedy_eval_results: "list | None" = None,
                             train_wr_history: "list | None" = None,
-                            baseline_eval_results: "list | None" = None):
+                            baseline_eval_results_team1: "list | None" = None,
+                            baseline_eval_results_team2: "list | None" = None):
         """Update progress bar, time labels, and training charts."""
         pct = battle_count / total_battles * 100 if total_battles else 0
         self.train_progress["value"] = pct
@@ -552,29 +553,30 @@ class PokeRLApp(tk.Tk):
 
         # Update summary stat labels
         self._update_stat_labels(metrics_history, greedy_eval_results, train_wr_history,
-                                 baseline_eval_results)
+                                 baseline_eval_results_team1, baseline_eval_results_team2)
 
         # Update all training charts
         self._update_training_charts(plateau_detector, metrics_history, greedy_eval_results,
-                                     train_wr_history, baseline_eval_results)
+                                     train_wr_history,
+                                     baseline_eval_results_team1, baseline_eval_results_team2)
 
     def _update_stat_labels(self, metrics_history: "list | None",
                             greedy_eval_results: "list | None",
                             train_wr_history: "list | None" = None,
-                            baseline_eval_results: "list | None" = None):
+                            baseline_eval_results_team1: "list | None" = None,
+                            baseline_eval_results_team2: "list | None" = None):
         """Update the summary stat labels with latest values."""
-        gwr_str = ""
+        wr_str = ""
         if greedy_eval_results:
             _, gwr = greedy_eval_results[-1]
-            gwr_str = f"Greedy WR: {gwr:.1%}"
-        if baseline_eval_results:
-            _, bwr = baseline_eval_results[-1]
-            if gwr_str:
-                gwr_str += f" | Baseline: {bwr:.1%}"
-            else:
-                gwr_str = f"Baseline WR: {bwr:.1%}"
-        if gwr_str:
-            self.stat_greedy_wr_var.set(gwr_str)
+            wr_str = f"Greedy: {gwr:.1%}"
+        if baseline_eval_results_team1 and baseline_eval_results_team2:
+            _, bwr1 = baseline_eval_results_team1[-1]
+            _, bwr2 = baseline_eval_results_team2[-1]
+            bl_str = f"BL T1={bwr1:.1%} T2={bwr2:.1%}"
+            wr_str = f"{wr_str} | {bl_str}" if wr_str else bl_str
+        if wr_str:
+            self.stat_greedy_wr_var.set(wr_str)
         if train_wr_history:
             _, twr = train_wr_history[-1]
             self.stat_train_wr_var.set(f"Train WR: {twr:.1%}")
@@ -590,7 +592,8 @@ class PokeRLApp(tk.Tk):
                                 metrics_history: "list | None",
                                 greedy_eval_results: "list | None",
                                 train_wr_history: "list | None" = None,
-                                baseline_eval_results: "list | None" = None):
+                                baseline_eval_results_team1: "list | None" = None,
+                                baseline_eval_results_team2: "list | None" = None):
         """Redraw all four training charts."""
         ax_wr, ax_loss, ax_entropy, ax_ev = (
             self._axes[0, 0], self._axes[0, 1],
@@ -647,19 +650,26 @@ class PokeRLApp(tk.Tk):
             ax_wr.plot(ge_battles, ge_wrs, color="#ff7f0e", linewidth=1.5,
                        marker="o", markersize=3, label="Greedy WR")
 
-        # Overlay baseline eval win rate (absolute skill measure)
-        if baseline_eval_results and len(baseline_eval_results) > 0:
-            bl_battles = [r[0] for r in baseline_eval_results]
-            bl_wrs = [r[1] for r in baseline_eval_results]
-            ax_wr.plot(bl_battles, bl_wrs, color="#2ca02c", linewidth=1.5,
-                       marker="s", markersize=3, label="Baseline WR")
+        # Overlay per-team baseline eval win rates
+        if baseline_eval_results_team1 and len(baseline_eval_results_team1) > 0:
+            bl1_battles = [r[0] for r in baseline_eval_results_team1]
+            bl1_wrs = [r[1] for r in baseline_eval_results_team1]
+            ax_wr.plot(bl1_battles, bl1_wrs, color="#2ca02c", linewidth=1.5,
+                       marker="s", markersize=3, label="Team1 vs BL")
+        if baseline_eval_results_team2 and len(baseline_eval_results_team2) > 0:
+            bl2_battles = [r[0] for r in baseline_eval_results_team2]
+            bl2_wrs = [r[1] for r in baseline_eval_results_team2]
+            ax_wr.plot(bl2_battles, bl2_wrs, color="#9467bd", linewidth=1.5,
+                       marker="^", markersize=3, label="Team2 vs BL")
 
         handles = [
             plt.Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="Train WR"),
             plt.Line2D([0], [0], color="#ff7f0e", linewidth=1.5, marker="o",
                        markersize=3, label="Greedy WR"),
             plt.Line2D([0], [0], color="#2ca02c", linewidth=1.5, marker="s",
-                       markersize=3, label="Baseline WR"),
+                       markersize=3, label="Team1 vs BL"),
+            plt.Line2D([0], [0], color="#9467bd", linewidth=1.5, marker="^",
+                       markersize=3, label="Team2 vs BL"),
             Patch(facecolor="#d62728", alpha=0.25, label="Plateau"),
         ]
         ax_wr.legend(handles=handles, fontsize=7, loc="upper left")
@@ -902,11 +912,15 @@ class PokeRLApp(tk.Tk):
 
         def _progress_cb(battle_count, total_battles, plateau_detector=None,
                          metrics_history=None, greedy_eval_results=None,
-                         train_wr_history=None, baseline_eval_results=None):
+                         train_wr_history=None,
+                         baseline_eval_results_team1=None,
+                         baseline_eval_results_team2=None):
             self.after(0, lambda bc=battle_count, tb=total_battles, pd=plateau_detector,
                               mh=metrics_history, ge=greedy_eval_results,
-                              twh=train_wr_history, ber=baseline_eval_results:
-                       self._on_progress_update(bc, tb, pd, mh, ge, twh, ber))
+                              twh=train_wr_history,
+                              bt1=baseline_eval_results_team1,
+                              bt2=baseline_eval_results_team2:
+                       self._on_progress_update(bc, tb, pd, mh, ge, twh, bt1, bt2))
 
         def train_thread():
             try:

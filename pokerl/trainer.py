@@ -87,10 +87,15 @@ class Trainer:
         self._league_opponent_player: Optional[RLPlayer] = None
         self._league_opponent_id: Optional[str] = None
 
-        # Baseline evaluation (absolute skill measure)
-        self._baseline_agent: Optional[PPOAgent] = None
-        self._baseline_player: Optional[RLPlayer] = None
-        self.baseline_eval_results: deque = deque(maxlen=5000)
+        # Per-team baselines for absolute skill measurement
+        self._baseline_agent1: Optional[PPOAgent] = None  # best known team1 agent
+        self._baseline_player1: Optional[RLPlayer] = None
+        self._baseline_agent2: Optional[PPOAgent] = None  # best known team2 agent
+        self._baseline_player2: Optional[RLPlayer] = None
+        self.baseline_eval_results_team1: deque = deque(maxlen=5000)  # (battle_count, wr)
+        self.baseline_eval_results_team2: deque = deque(maxlen=5000)  # (battle_count, wr)
+        self._baseline1_promotions: int = 0
+        self._baseline2_promotions: int = 0
 
         # Best-model tracking and regression protection
         self.best_eval_win_rate: float = 0.0
@@ -253,13 +258,18 @@ class Trainer:
         self.greedy_eval_results.append((self.battle_count, wr))
         return wr
 
-    def _init_baseline(self):
-        """Freeze a copy of agent1 as a baseline for absolute skill measurement."""
-        self._baseline_agent = PPOAgent(self.config, agent_id="baseline")
-        self._baseline_agent.load_weights_only(self.agent1.get_state_dict())
-        self._baseline_agent.set_eval()
-        self._baseline_player = create_player(
-            agent=self._baseline_agent,
+    def _init_baselines(self):
+        """Freeze copies of both agents as baselines for absolute skill measurement.
+
+        Each baseline plays its respective team.  Current agents are evaluated
+        against the *opposing* baseline so that promotions reflect the ability
+        to beat the strongest known version of the other team.
+        """
+        self._baseline_agent1 = PPOAgent(self.config, agent_id="baseline_team1")
+        self._baseline_agent1.load_weights_only(self.agent1.get_state_dict())
+        self._baseline_agent1.set_eval()
+        self._baseline_player1 = create_player(
+            agent=self._baseline_agent1,
             config=self.config,
             team_str=self.team1_str,
             collect_data=False,
@@ -267,35 +277,84 @@ class Trainer:
             max_concurrent=1,
             server_configuration=self.server_config,
         )
-        logger.info("Baseline agent frozen for absolute skill evaluation")
 
-    async def _run_baseline_eval(self) -> float:
-        """Run evaluation battles between current agent1 and the frozen baseline.
+        self._baseline_agent2 = PPOAgent(self.config, agent_id="baseline_team2")
+        self._baseline_agent2.load_weights_only(self.agent2.get_state_dict())
+        self._baseline_agent2.set_eval()
+        self._baseline_player2 = create_player(
+            agent=self._baseline_agent2,
+            config=self.config,
+            team_str=self.team2_str,
+            collect_data=False,
+            deterministic=False,
+            max_concurrent=1,
+            server_configuration=self.server_config,
+        )
+        logger.info("Per-team baseline agents frozen for absolute skill evaluation")
 
-        Returns win rate for the current agent1 (higher = improving).
+    async def _run_baseline_eval(self) -> Tuple[float, float]:
+        """Evaluate both agents against the opposing team's baseline.
+
+        Returns (wr1, wr2):
+          - wr1: current agent1 (team1) vs baseline2 (team2)
+          - wr2: current agent2 (team2) vs baseline1 (team1)
         """
-        # Create an eval player for agent1 (reuse the existing one)
-        player1 = self._get_or_create_eval_player1()
-        player2 = self._baseline_player
-
-        self.agent1.set_eval()
-
-        wins_before = player1.n_won_battles
-        total_before = player1.n_finished_battles
-
         n = self.config.baseline_eval_battles
-        await player1.battle_against(player2, n_battles=n)
+        self.agent1.set_eval()
+        self.agent2.set_eval()
 
-        wins_after = player1.n_won_battles
-        total_after = player1.n_finished_battles
-        played = total_after - total_before
-        wins = wins_after - wins_before
+        # Agent1 (team1) vs baseline2 (team2)
+        p1 = self._get_or_create_eval_player1()
+        w1_before, t1_before = p1.n_won_battles, p1.n_finished_battles
+        await p1.battle_against(self._baseline_player2, n_battles=n)
+        played1 = p1.n_finished_battles - t1_before
+        wins1 = p1.n_won_battles - w1_before
+        wr1 = wins1 / played1 if played1 > 0 else 0.5
+
+        # Agent2 (team2) vs baseline1 (team1)
+        p2 = self._get_or_create_eval_player2()
+        w2_before, t2_before = p2.n_won_battles, p2.n_finished_battles
+        await p2.battle_against(self._baseline_player1, n_battles=n)
+        played2 = p2.n_finished_battles - t2_before
+        wins2 = p2.n_won_battles - w2_before
+        wr2 = wins2 / played2 if played2 > 0 else 0.5
 
         self.agent1.set_train()
+        self.agent2.set_train()
 
-        wr = wins / played if played > 0 else 0.5
-        self.baseline_eval_results.append((self.battle_count, wr))
-        return wr
+        self.baseline_eval_results_team1.append((self.battle_count, wr1))
+        self.baseline_eval_results_team2.append((self.battle_count, wr2))
+        return wr1, wr2
+
+    def _maybe_promote_baselines(self, wr1: float, wr2: float):
+        """Promote baselines when current agents beat the opposing baseline."""
+        threshold = self.config.baseline_promotion_threshold
+        promoted = False
+
+        if wr1 > threshold:
+            self._baseline_agent1.load_weights_only(self.agent1.get_state_dict())
+            self._baseline1_promotions += 1
+            promoted = True
+            logger.info(
+                f"Baseline team1 promoted (WR vs BL2={wr1:.1%}, "
+                f"promotion #{self._baseline1_promotions})"
+            )
+
+        if wr2 > threshold:
+            self._baseline_agent2.load_weights_only(self.agent2.get_state_dict())
+            self._baseline2_promotions += 1
+            promoted = True
+            logger.info(
+                f"Baseline team2 promoted (WR vs BL1={wr2:.1%}, "
+                f"promotion #{self._baseline2_promotions})"
+            )
+
+        if promoted:
+            self.ckpt_manager.save_best(
+                self.agent1, self.agent2,
+                self.league, self.wp_estimator,
+                self.battle_count, min(wr1, wr2),
+            )
 
     def resume_if_available(self):
         """Resume from latest checkpoint if available."""
@@ -352,7 +411,10 @@ class Trainer:
         self.greedy_eval_results = deque(maxlen=5000)
         self.train_wr_history = deque(maxlen=5000)
         self.metrics_history = deque(maxlen=5000)
-        self.baseline_eval_results = deque(maxlen=5000)
+        self.baseline_eval_results_team1 = deque(maxlen=5000)
+        self.baseline_eval_results_team2 = deque(maxlen=5000)
+        self._baseline1_promotions = 0
+        self._baseline2_promotions = 0
         self.best_eval_win_rate = 0.0
         self.regression_counter = 0
         self._entropy_bump_until = 0
@@ -374,9 +436,9 @@ class Trainer:
         else:
             self.resume_if_available()
 
-        # Freeze a baseline snapshot for absolute skill evaluation
+        # Freeze per-team baselines for absolute skill evaluation
         if self.config.baseline_eval_enabled:
-            self._init_baseline()
+            self._init_baselines()
 
         logger.info(
             f"Starting training: {self.config.total_battles} battles, "
@@ -429,52 +491,19 @@ class Trainer:
                     f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
                 )
 
-                # Baseline evaluation (absolute skill measure)
-                baseline_wr = None
+                # Per-team baseline evaluation (absolute skill measure)
                 if (self.config.baseline_eval_enabled
-                        and self._baseline_agent is not None):
+                        and self._baseline_agent1 is not None):
                     bl_interval = (self.config.baseline_eval_interval
                                    or self.config.greedy_eval_interval)
                     if bl_interval > 0 and self.battle_count % bl_interval == 0:
-                        baseline_wr = await self._run_baseline_eval()
+                        wr1, wr2 = await self._run_baseline_eval()
                         logger.info(
                             f"  Baseline eval at battle {self.battle_count}: "
-                            f"WR={baseline_wr:.1%} ({self.config.baseline_eval_battles} battles)"
+                            f"Team1={wr1:.1%}, Team2={wr2:.1%} "
+                            f"(promotions: {self._baseline1_promotions}/{self._baseline2_promotions})"
                         )
-
-                # Best-model tracking: use baseline WR (absolute skill) when
-                # available, otherwise fall back to greedy WR.
-                if self.config.best_model_tracking:
-                    tracking_wr = baseline_wr if baseline_wr is not None else greedy_wr
-
-                    if tracking_wr > self.best_eval_win_rate:
-                        self.best_eval_win_rate = tracking_wr
-                        self.regression_counter = 0
-                        self.ckpt_manager.save_best(
-                            self.agent1, self.agent2,
-                            self.league, self.wp_estimator,
-                            self.battle_count, tracking_wr,
-                        )
-                    elif (self.config.regression_rollback_enabled
-                          and tracking_wr < self.best_eval_win_rate - self.config.regression_threshold):
-                        self.regression_counter += 1
-                        logger.warning(
-                            f"Regression signal {self.regression_counter}/"
-                            f"{self.config.regression_eval_window}: "
-                            f"current={tracking_wr:.1%}, best={self.best_eval_win_rate:.1%}"
-                        )
-                        if self.regression_counter >= self.config.regression_eval_window:
-                            logger.warning(
-                                f"Policy regression confirmed. "
-                                f"Rolling back to best model (WR={self.best_eval_win_rate:.1%})."
-                            )
-                            self.ckpt_manager.load_best(
-                                self.agent1, self.agent2,
-                                self.league, self.wp_estimator,
-                            )
-                            self.regression_counter = 0
-                    else:
-                        self.regression_counter = 0
+                        self._maybe_promote_baselines(wr1, wr2)
 
             # Periodic logging + plateau detection
             if self.battle_count % 50 == 0:
@@ -520,7 +549,8 @@ class Trainer:
                     self.metrics_history,
                     self.greedy_eval_results,
                     self.train_wr_history,
-                    self.baseline_eval_results,
+                    self.baseline_eval_results_team1,
+                    self.baseline_eval_results_team2,
                 )
 
         # Final checkpoint
@@ -765,10 +795,16 @@ class Trainer:
                 "explained_variance": self._latest_explained_variance,
                 "agent1_wins": self.agent1.wins,
                 "agent2_wins": self.agent2.wins,
-                "baseline_win_rate": (
-                    self.baseline_eval_results[-1][1]
-                    if self.baseline_eval_results else None
+                "baseline_wr_team1": (
+                    self.baseline_eval_results_team1[-1][1]
+                    if self.baseline_eval_results_team1 else None
                 ),
+                "baseline_wr_team2": (
+                    self.baseline_eval_results_team2[-1][1]
+                    if self.baseline_eval_results_team2 else None
+                ),
+                "baseline_promotions_team1": self._baseline1_promotions,
+                "baseline_promotions_team2": self._baseline2_promotions,
             },
         )
 
@@ -791,9 +827,13 @@ class Trainer:
         if self.greedy_eval_results:
             _, last_greedy_wr = self.greedy_eval_results[-1]
             greedy_str = f" | Greedy WR: {last_greedy_wr:.1%}"
-        if self.baseline_eval_results:
-            _, last_baseline_wr = self.baseline_eval_results[-1]
-            greedy_str += f" | Baseline WR: {last_baseline_wr:.1%}"
+        if self.baseline_eval_results_team1:
+            _, bl1 = self.baseline_eval_results_team1[-1]
+            _, bl2 = self.baseline_eval_results_team2[-1]
+            greedy_str += (
+                f" | BL: T1={bl1:.1%} T2={bl2:.1%} "
+                f"(promo {self._baseline1_promotions}/{self._baseline2_promotions})"
+            )
 
         # Track training win rate history for GUI charting
         self.train_wr_history.append((self.battle_count, wr))

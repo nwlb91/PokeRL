@@ -61,7 +61,8 @@ class Config:
     # --- Baseline evaluation (absolute skill measure) ---
     baseline_eval_enabled: bool = True    # evaluate current agent vs frozen initial snapshot
     baseline_eval_interval: int = 0       # 0 = reuse greedy_eval_interval
-    baseline_eval_battles: int = 50       # number of battles per baseline eval
+    baseline_eval_battles: int = 50       # number of battles per baseline eval per team
+    baseline_promotion_threshold: float = 0.55  # WR to beat opposing baseline for promotion
 
     # --- AlphaStar League ---
     league_size: int = 20  # max agents in the league
