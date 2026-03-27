@@ -768,9 +768,13 @@ class Trainer:
             self.recent_results = self.recent_results[-100:]
 
     def _apply_reward_shaping(self, player: RLPlayer, episode: CompletedEpisode):
-        """Apply vectorized win probability reward shaping."""
+        """Apply vectorized win probability reward shaping.
+
+        Operates on the episode's locally-buffered pending_steps (not the
+        shared RolloutBuffer) so concurrent battles don't interfere.
+        """
         observations = RLPlayer.get_battle_observations(episode)
-        buffer = player.agent.battle_buffer
+        pending = episode.state.pending_steps
 
         if len(observations) < 2:
             return
@@ -780,15 +784,6 @@ class Trainer:
             observations, gamma=self.config.gamma
         )
 
-        # Walk backwards to find un-done steps from current episode
-        steps_to_shape = []
-        for i in range(len(buffer) - 1, -1, -1):
-            if buffer.steps[i].done:
-                break
-            steps_to_shape.append(i)
-        steps_to_shape.reverse()
-
-        # Validate alignment between observations, shaped rewards, and buffer steps
         if len(shaped_rewards) == 0:
             logger.debug(
                 "Reward shaping produced 0 shaped rewards from %d observations; "
@@ -796,11 +791,11 @@ class Trainer:
                 len(observations),
             )
 
-        if len(steps_to_shape) != len(shaped_rewards):
+        if len(pending) != len(shaped_rewards):
             logger.warning(
-                "Reward shaping mismatch: %d buffer steps vs %d shaped rewards "
+                "Reward shaping mismatch: %d pending steps vs %d shaped rewards "
                 "(from %d observations). Applying what we can.",
-                len(steps_to_shape),
+                len(pending),
                 len(shaped_rewards),
                 len(observations),
             )
@@ -809,11 +804,11 @@ class Trainer:
         # receives a small positive per-turn signal even when WP deltas
         # are near zero (prevents gradient starvation in 100-0 matchups).
         surv = self.config.survival_reward_per_turn
-        for j, buf_idx in enumerate(steps_to_shape):
+        for j, step in enumerate(pending):
             if j < len(shaped_rewards):
-                buffer.steps[buf_idx].reward = shaped_rewards[j] + surv
+                step.reward = shaped_rewards[j] + surv
             else:
-                buffer.steps[buf_idx].reward = surv
+                step.reward = surv
 
     def _inject_param_noise(self):
         """Inject small Gaussian noise into policy parameters to escape plateaus."""

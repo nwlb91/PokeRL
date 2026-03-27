@@ -41,8 +41,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _BattleEpisodeState:
-    """Per-battle episode state for rollout collection and reward shaping."""
+    """Per-battle episode state for rollout collection and reward shaping.
+
+    Pending steps are buffered locally (not in the shared RolloutBuffer)
+    so that concurrent battles don't interleave steps.  They are flushed
+    to the shared buffer in ``finalize_episode()`` after reward shaping.
+    """
     battle_observations: list = field(default_factory=list)
+    pending_steps: list = field(default_factory=list)  # List[RolloutStep]
     prev_obs: Optional[np.ndarray] = None
     prev_action: Optional[int] = None
     prev_action_mask: Optional[np.ndarray] = None
@@ -154,7 +160,8 @@ class RLPlayer(Player):
             state.prev_own_hp = own_hp
             state.prev_opp_hp = opp_hp
 
-        # If we have a previous step, record its reward (0 for mid-battle)
+        # If we have a previous step, buffer it locally (not in the shared
+        # RolloutBuffer) so concurrent battles don't interleave steps.
         if self.collect_data and (state := self._episode_states.get(battle.battle_tag)) and state.prev_obs is not None:
             step = RolloutStep(
                 obs=state.prev_obs,
@@ -165,7 +172,7 @@ class RLPlayer(Player):
                 reward=0.0,  # will be reshaped later
                 done=False,
             )
-            self.agent.battle_buffer.add(step)
+            state.pending_steps.append(step)
 
         action, log_prob, value = self.agent.select_battle_action(
             obs, action_mask, deterministic=self.deterministic
@@ -200,15 +207,21 @@ class RLPlayer(Player):
         )
 
     def finalize_episode(self, episode: CompletedEpisode, terminal_reward: float):
-        """Finalize a completed episode by recording rollout steps.
+        """Finalize a completed episode by flushing steps to the shared buffer.
 
-        Called by the trainer after computing the terminal reward
-        (including KO/damage shaping).
+        Called by the trainer after reward shaping has been applied to
+        ``episode.state.pending_steps``.  Steps are flushed contiguously
+        so that GAE computation sees correct episode boundaries even when
+        multiple battles ran concurrently.
         """
         if not self.collect_data:
             return
 
         state = episode.state
+
+        # Flush all pending mid-battle steps (rewards already shaped)
+        for step in state.pending_steps:
+            self.agent.battle_buffer.add(step)
 
         # Record final battle step
         if state.prev_obs is not None:
