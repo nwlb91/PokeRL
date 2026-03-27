@@ -404,6 +404,12 @@ class Trainer:
                 f"promotion #{self._baseline2_promotions})"
             )
 
+        # Seed promoted agents into the league as best-tagged opponents
+        if wr1 > self._baseline_ref_wr1 + margin:
+            self.league.add_best_agent(self.agent1, team_id=0, win_rate=wr1)
+        if wr2 > self._baseline_ref_wr2 + margin:
+            self.league.add_best_agent(self.agent2, team_id=1, win_rate=wr2)
+
         if promoted:
             # Re-evaluate baseline-vs-baseline reference since one or both
             # baselines changed.
@@ -550,6 +556,41 @@ class Trainer:
                     f"  Greedy eval at battle {self.battle_count}: "
                     f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
                 )
+
+                # Best-model tracking: save when we hit a new high
+                if self.config.best_model_tracking:
+                    if greedy_wr > self.best_eval_win_rate:
+                        self.best_eval_win_rate = greedy_wr
+                        self.regression_counter = 0
+                        self.ckpt_manager.save_best(
+                            self.agent1, self.agent2,
+                            self.league, self.wp_estimator,
+                            self.battle_count, greedy_wr,
+                        )
+                        logger.info(
+                            f"  New best model saved (greedy WR={greedy_wr:.1%}) "
+                            f"at battle {self.battle_count}"
+                        )
+                    elif self.config.regression_rollback_enabled:
+                        if greedy_wr < self.best_eval_win_rate - self.config.regression_threshold:
+                            self.regression_counter += 1
+                            logger.warning(
+                                f"Regression detected: greedy WR={greedy_wr:.1%} vs "
+                                f"best={self.best_eval_win_rate:.1%} "
+                                f"(counter={self.regression_counter}/"
+                                f"{self.config.regression_eval_window})"
+                            )
+                            if self.regression_counter >= self.config.regression_eval_window:
+                                logger.warning(
+                                    "Rolling back to best model after sustained regression!"
+                                )
+                                self.ckpt_manager.load_best(
+                                    self.agent1, self.agent2,
+                                    self.league, self.wp_estimator,
+                                )
+                                self.regression_counter = 0
+                        else:
+                            self.regression_counter = 0
 
                 # Per-team baseline evaluation (absolute skill measure)
                 if (self.config.baseline_eval_enabled

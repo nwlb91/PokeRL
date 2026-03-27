@@ -116,6 +116,8 @@ def parse_args():
                         help="WR drop below best that triggers rollback")
     parser.add_argument("--regression-eval-window", type=int, default=3,
                         help="Consecutive bad evals before rollback")
+    parser.add_argument("--regression-rollback", action="store_true",
+                        help="Enable rollback to best model on sustained regression")
 
     # Infinite training & plateau response
     parser.add_argument("--infinite", action="store_true",
@@ -191,6 +193,7 @@ def main():
         best_model_tracking=not args.no_best_model_tracking,
         regression_threshold=args.regression_threshold,
         regression_eval_window=args.regression_eval_window,
+        regression_rollback_enabled=args.regression_rollback,
         league_size=args.league_size,
         checkpoint_interval=args.checkpoint_interval,
         pfsp_temperature=args.pfsp_temperature,

@@ -59,6 +59,7 @@ class LeagueAgent:
         self.battle_count = battle_count
         self.win_rate_at_snapshot = win_rate_at_snapshot
         self.selection_count = 0  # how often selected as opponent
+        self.is_best = False  # tagged best agents are protected from pruning
 
     @property
     def state_dict(self) -> dict:
@@ -207,6 +208,47 @@ class League:
         )
         return agent_id
 
+    def add_best_agent(self, agent: PPOAgent, team_id: int,
+                       win_rate: float) -> str:
+        """Add a confirmed-best agent to the league, bypassing the admission gate.
+
+        Best agents are tagged so they are protected from pruning, ensuring the
+        strongest known version of each team is always available as a PFSP target.
+        """
+        agent_id = f"best_{team_id}_{self._next_id:04d}"
+        self._next_id += 1
+
+        checkpoint_path = str(self.checkpoint_dir / f"{agent_id}.pt")
+        state = agent.get_state_dict()
+        torch.save(state, checkpoint_path)
+
+        league_agent = LeagueAgent(
+            agent_id=agent_id,
+            team_id=team_id,
+            state_dict=state,
+            checkpoint_path=checkpoint_path,
+            battle_count=agent.total_battles,
+            win_rate_at_snapshot=win_rate,
+        )
+        league_agent.is_best = True
+
+        # Remove any previous best agent for this team to avoid accumulation
+        self.agents = [
+            a for a in self.agents
+            if not (a.is_best and a.team_id == team_id)
+        ]
+        self.agents.append(league_agent)
+
+        if len(self.agents) > self.config.league_size:
+            self._trim_league()
+        self._evict_old_weights()
+
+        logger.info(
+            f"Best agent {agent_id} added to league "
+            f"(wr={win_rate:.1%}, league_size={len(self.agents)})"
+        )
+        return agent_id
+
     # ------------------------------------------------------------------
     # Opponent selection
     # ------------------------------------------------------------------
@@ -329,7 +371,7 @@ class League:
             team_agents = [a for a in self.agents if a.team_id == team_id]
 
             for agent in team_agents:
-                if agent.agent_id in protected or agent.agent_id in to_remove:
+                if agent.agent_id in protected or agent.agent_id in to_remove or agent.is_best:
                     continue
 
                 for other in team_agents:
@@ -396,11 +438,11 @@ class League:
         max_size = self.config.league_size
         protected = self._protected_agent_ids()
 
-        # Score non-protected agents
+        # Score non-protected agents (best agents are also protected)
         scored = [
             (self._agent_quality_score(a), a.agent_id)
             for a in self.agents
-            if a.agent_id not in protected
+            if a.agent_id not in protected and not a.is_best
         ]
         scored.sort()  # lowest score first
 
@@ -492,6 +534,7 @@ class League:
                     "battle_count": a.battle_count,
                     "win_rate_at_snapshot": a.win_rate_at_snapshot,
                     "selection_count": a.selection_count,
+                    "is_best": a.is_best,
                 }
                 for a in self.agents
             ],
@@ -517,4 +560,5 @@ class League:
                     win_rate_at_snapshot=agent_data.get("win_rate_at_snapshot", 0.5),
                 )
                 league_agent.selection_count = agent_data.get("selection_count", 0)
+                league_agent.is_best = agent_data.get("is_best", False)
                 self.agents.append(league_agent)
