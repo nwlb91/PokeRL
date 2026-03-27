@@ -54,6 +54,7 @@ class Trainer:
 
         # League
         self.league = League(config)
+        self.league.live_agent_ids = [self.agent1.agent_id, self.agent2.agent_id]
 
         # Win probability estimator (shared between both agents)
         self.wp_estimator = WinProbabilityEstimator(config)
@@ -919,9 +920,20 @@ class Trainer:
             },
         )
 
-        # Admission-gated: only adds if the agent is novel or has improved
-        self.league.add_agent(self.agent1, team_id=0, current_win_rate=wr)
-        self.league.add_agent(self.agent2, team_id=1, current_win_rate=1 - wr)
+        # Compute exploitation win rates vs opposing team's best league agent
+        exploit_wr1 = self._exploit_win_rate(self.agent1.agent_id, opponent_team=1)
+        exploit_wr2 = self._exploit_win_rate(self.agent2.agent_id, opponent_team=0)
+
+        # Admission-gated: only adds if the agent is strong, exploits the
+        # best, or is novel with a minimum strength floor
+        self.league.add_agent(
+            self.agent1, team_id=0, current_win_rate=wr,
+            exploit_win_rate=exploit_wr1,
+        )
+        self.league.add_agent(
+            self.agent2, team_id=1, current_win_rate=1 - wr,
+            exploit_win_rate=exploit_wr2,
+        )
 
         # Periodic pruning of redundant agents
         self.league.maybe_prune(self.battle_count)
@@ -930,6 +942,27 @@ class Trainer:
             f"Checkpoint at battle {self.battle_count}. "
             f"League size: {len(self.league.agents)}"
         )
+
+    def _exploit_win_rate(self, agent_id: str,
+                          opponent_team: int) -> Optional[float]:
+        """Return the payoff EMA win rate of *agent_id* against the opposing
+        team's best-tagged league agent, or ``None`` if no best agent exists."""
+        best_agents = [
+            a for a in self.league.agents
+            if a.team_id == opponent_team and a.is_best
+        ]
+        if not best_agents:
+            return None
+        # There should be at most one best per team, but take the latest
+        best = best_agents[-1]
+        wr = self.league.payoff.get_win_rate(agent_id, best.agent_id)
+        # Only return a meaningful value if we have actual matchup data
+        _, total = self.league.payoff._records.get(
+            (agent_id, best.agent_id), (0.5, 0)
+        )
+        if total == 0:
+            return None
+        return wr
 
     def _log_stats(self):
         """Log training statistics."""

@@ -5,24 +5,27 @@ Implements a simplified version of AlphaStar's league training:
 1. **Main Agents**: Two actively training agents (one per team). They play
    against each other and against historical league opponents.
 
-2. **League**: A pool of frozen agent checkpoints. As main agents improve,
-   snapshots are added to the league *only if they pass admission criteria*
-   (sufficient novelty or performance change).
+2. **League**: A pool of frozen agent checkpoints. Snapshots are admitted
+   when they demonstrate sufficient *strength* (high win rate), *exploit*
+   the opposing team's best agent, or offer *novel parameters* while
+   maintaining a minimum strength floor.
 
-3. **Payoff Matrix**: Tracks win rates between all pairs of agents in the
-   league, used for Prioritized Fictitious Self-Play (PFSP).
+3. **Payoff Matrix**: Tracks EMA (exponential moving average) win rates
+   between all pairs of agents, used for Prioritized Fictitious Self-Play
+   (PFSP).  The EMA ensures recent performance is weighted more heavily
+   than stale history.
 
 4. **PFSP Opponent Selection**: When choosing a league opponent, we
    prioritize opponents that the current agent struggles against, preventing
    blind spots.
 
-5. **Pruning**: Periodically removes redundant agents — those that are
-   superseded by similar-but-stronger agents — keeping the league lean and
-   relevant.
+5. **Pruning**: Periodically removes redundant agents (superseded by
+   similar-but-stronger members) and stale agents (dominated by all live
+   agents) — unless a stale agent uniquely exploits another league member.
 
 Opponent selection distribution per battle:
   - main_agent_fraction: play against the other team's latest agent
-  - exploiter_fraction: play against a PFSP-selected historical opponent
+  - pfsp_fraction: play against a PFSP-selected historical opponent
   - self_play_fraction: play against own team's historical checkpoint
 """
 
@@ -76,37 +79,44 @@ class LeagueAgent:
 
 
 class PayoffMatrix:
-    """Tracks win rates between agent pairs."""
+    """Tracks win rates between agent pairs using exponential moving average.
 
-    def __init__(self):
-        # (agent_id_a, agent_id_b) -> (wins_a, total_games)
-        self._records: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    Each (agent_a, agent_b) pair stores ``(ema_win_rate, total_games)``.
+    The EMA gives more weight to recent results, so PFSP selection reflects
+    the current agent's strengths and weaknesses rather than stale history.
+    """
+
+    def __init__(self, decay: float = 0.995):
+        # (agent_id_a, agent_id_b) -> (ema_win_rate, total_games)
+        self._records: Dict[Tuple[str, str], Tuple[float, int]] = {}
+        self.decay = decay
 
     def record_result(self, agent_a: str, agent_b: str, a_won: bool):
-        """Record a game result."""
-        key = (agent_a, agent_b)
-        wins, total = self._records.get(key, (0, 0))
-        self._records[key] = (wins + int(a_won), total + 1)
+        """Record a game result, updating EMAs for both perspectives."""
+        self._update_ema(agent_a, agent_b, float(a_won))
+        self._update_ema(agent_b, agent_a, float(not a_won))
 
-        # Also record from b's perspective
-        key_b = (agent_b, agent_a)
-        wins_b, total_b = self._records.get(key_b, (0, 0))
-        self._records[key_b] = (wins_b + int(not a_won), total_b + 1)
+    def _update_ema(self, agent_a: str, agent_b: str, outcome: float):
+        key = (agent_a, agent_b)
+        ema, total = self._records.get(key, (0.5, 0))
+        ema = self.decay * ema + (1.0 - self.decay) * outcome
+        self._records[key] = (ema, total + 1)
 
     def get_win_rate(self, agent_a: str, agent_b: str) -> float:
-        """Get win rate of agent_a against agent_b."""
+        """Get EMA win rate of agent_a against agent_b."""
         key = (agent_a, agent_b)
-        wins, total = self._records.get(key, (0, 0))
+        ema, total = self._records.get(key, (0.5, 0))
         if total == 0:
             return 0.5  # unknown matchup
-        return wins / total
+        return ema
 
     def get_state_dict(self) -> dict:
-        return {"records": dict(self._records)}
+        return {"records": dict(self._records), "decay": self.decay}
 
     def load_state_dict(self, state: dict):
+        self.decay = state.get("decay", self.decay)
         self._records = {
-            tuple(k) if isinstance(k, list) else k: tuple(v)
+            tuple(k) if isinstance(k, list) else k: (float(v[0]), int(v[1]))
             for k, v in state["records"].items()
         }
 
@@ -114,36 +124,48 @@ class PayoffMatrix:
 class League:
     """AlphaStar-style league for training diverse agents.
 
-    Agents are admitted based on novelty (parameter divergence from existing
-    members) or performance change (win-rate shift since the last snapshot).
-    Redundant agents — those superseded by similar-but-stronger members — are
-    periodically pruned so the league stays lean and relevant.
+    Agents are admitted when they are strong (high win rate), exploit the
+    opposing team's best agent, or offer novel parameters above a strength
+    floor.  Redundant agents (parameter-similar to a stronger member) and
+    stale agents (dominated by all live agents, unless they uniquely exploit
+    another league member) are periodically pruned.
     """
 
     def __init__(self, config: Config):
         self.config = config
         self.agents: List[LeagueAgent] = []  # frozen snapshots
-        self.payoff = PayoffMatrix()
+        self.payoff = PayoffMatrix(decay=config.payoff_decay)
         self.checkpoint_dir = Path(config.checkpoint_dir) / "league"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self._next_id = 0
         self._last_prune_battle = 0
+        self.live_agent_ids: List[str] = []  # set by trainer for staleness checks
 
     # ------------------------------------------------------------------
     # Admission
     # ------------------------------------------------------------------
 
     def add_agent(self, agent: PPOAgent, team_id: int,
-                  current_win_rate: float = 0.5) -> Optional[str]:
+                  current_win_rate: float = 0.5,
+                  exploit_win_rate: Optional[float] = None) -> Optional[str]:
         """Snapshot a training agent and add it to the league *if* it passes
         the admission gate.
 
         Admission is granted when any of the following hold:
         - The team has fewer agents than ``league_min_size // 2`` (cold start).
-        - The main agent's win rate has shifted by at least
-          ``league_admit_win_rate_delta`` since the last same-team admission.
-        - The agent's parameters are at least ``league_admit_param_novelty``
-          (relative L2) away from every existing same-team member.
+        - The agent is strong: ``current_win_rate >= league_admit_min_win_rate``.
+        - The agent exploits the opposing team's best agent:
+          ``exploit_win_rate >= league_admit_exploit_wr``.
+        - The agent's parameters are novel (relative L2 ≥
+          ``league_admit_param_novelty``) AND its win rate is at least 0.50.
+
+        Args:
+            agent: The live training agent to snapshot.
+            team_id: Which team this agent belongs to (0 or 1).
+            current_win_rate: The agent's recent overall win rate.
+            exploit_win_rate: The agent's payoff win rate vs the opposing
+                team's best league agent, if one exists.  ``None`` when there
+                is no best agent to compare against.
 
         Returns:
             The league agent's ID if admitted, ``None`` otherwise.
@@ -154,21 +176,28 @@ class League:
         if len(team_agents) < self.config.league_min_size // 2:
             return self._admit_agent(agent, team_id, current_win_rate)
 
-        # Gate 1: Win-rate delta
-        last_wr = team_agents[-1].win_rate_at_snapshot
-        wr_delta = abs(current_win_rate - last_wr)
-        if wr_delta >= self.config.league_admit_win_rate_delta:
+        # Gate 1: Strength — agent performs well overall
+        if current_win_rate >= self.config.league_admit_min_win_rate:
             return self._admit_agent(agent, team_id, current_win_rate)
 
-        # Gate 2: Parameter novelty
-        candidate_state = agent.get_state_dict()
-        min_dist = self._min_param_distance(candidate_state, team_agents)
-        if min_dist >= self.config.league_admit_param_novelty:
+        # Gate 2: Exploitation — agent beats the opposing best agent
+        if (exploit_win_rate is not None
+                and exploit_win_rate >= self.config.league_admit_exploit_wr):
             return self._admit_agent(agent, team_id, current_win_rate)
+
+        # Gate 3: Parameter novelty with a strength floor
+        if current_win_rate >= 0.50:
+            candidate_state = agent.get_state_dict()
+            min_dist = self._min_param_distance(candidate_state, team_agents)
+            if min_dist >= self.config.league_admit_param_novelty:
+                return self._admit_agent(agent, team_id, current_win_rate)
+        else:
+            min_dist = 0.0
 
         logger.debug(
             f"League admission denied for team {team_id}: "
-            f"wr_delta={wr_delta:.4f} (need {self.config.league_admit_win_rate_delta}), "
+            f"wr={current_win_rate:.4f} (need {self.config.league_admit_min_win_rate}), "
+            f"exploit_wr={exploit_win_rate}, "
             f"param_novelty={min_dist:.4f} (need {self.config.league_admit_param_novelty})"
         )
         return None
@@ -273,7 +302,7 @@ class League:
         if roll < self.config.main_agent_fraction:
             selected = opponents[-1]
             kind = "main"
-        elif roll < self.config.main_agent_fraction + self.config.exploiter_fraction:
+        elif roll < self.config.main_agent_fraction + self.config.pfsp_fraction:
             selected = self._pfsp_select(current_agent_id, opponents)
             kind = "pfsp"
         else:
@@ -330,12 +359,21 @@ class League:
         self._prune_redundant()
 
     def _prune_redundant(self):
-        """Remove agents superseded by similar-but-stronger league members.
+        """Remove agents that are redundant or stale.
 
-        For each pair of same-team agents whose relative parameter distance is
-        below ``league_prune_similarity``, the lower-quality agent (by
-        ``_agent_quality_score``) is removed.  The most recent agent per team
-        is always protected.
+        Two pruning passes:
+
+        1. **Similarity**: For each pair of same-team agents whose relative
+           parameter distance is below ``league_prune_similarity``, the
+           lower-quality agent is removed.
+
+        2. **Staleness**: Agents that both live agents dominate (payoff EMA
+           ≥ ``league_prune_stale_wr``) are removed — *unless* the agent is
+           the strongest exploiter of some other league member (it uniquely
+           provides training signal).
+
+        The most recent agent per team and ``is_best``-tagged agents are
+        always protected.
         """
         if len(self.agents) <= self.config.league_min_size:
             return
@@ -344,6 +382,7 @@ class League:
         protected = self._protected_agent_ids()
         to_remove: set = set()
 
+        # Pass 1: Similarity-based pruning
         for team_id in range(2):
             team_agents = [a for a in self.agents if a.team_id == team_id]
 
@@ -362,6 +401,36 @@ class League:
                             to_remove.add(agent.agent_id)
                             break
 
+        # Pass 2: Staleness-based pruning
+        if self.live_agent_ids:
+            stale_wr = self.config.league_prune_stale_wr
+            for agent in self.agents:
+                if (agent.agent_id in protected or agent.is_best
+                        or agent.agent_id in to_remove):
+                    continue
+
+                # Check if all live agents dominate this league agent
+                dominated = all(
+                    self.payoff.get_win_rate(live_id, agent.agent_id) >= stale_wr
+                    for live_id in self.live_agent_ids
+                )
+                if not dominated:
+                    continue
+
+                # Protect if this agent uniquely exploits another league member
+                if self._is_unique_exploiter(agent, to_remove):
+                    logger.debug(
+                        f"Stale agent {agent.agent_id} kept: uniquely "
+                        f"exploits another league member"
+                    )
+                    continue
+
+                to_remove.add(agent.agent_id)
+                logger.debug(
+                    f"Stale agent {agent.agent_id} marked for removal "
+                    f"(dominated by all live agents)"
+                )
+
         # Never prune below minimum size
         max_removable = len(self.agents) - self.config.league_min_size
         if len(to_remove) > max_removable:
@@ -372,7 +441,7 @@ class League:
         if to_remove:
             self.agents = [a for a in self.agents if a.agent_id not in to_remove]
             logger.info(
-                f"Pruned {len(to_remove)} redundant league agents "
+                f"Pruned {len(to_remove)} redundant/stale league agents "
                 f"(remaining: {len(self.agents)})"
             )
 
@@ -388,6 +457,37 @@ class League:
         recency = agent.battle_count / max(1, self._max_battle_count())
         utility = math.log1p(agent.selection_count) / 10.0
         return 0.4 * strength + 0.4 * recency + 0.2 * utility
+
+    def _is_unique_exploiter(self, candidate: LeagueAgent,
+                             already_removing: set) -> bool:
+        """Return True if *candidate* has the highest payoff win rate against
+        any other league agent (i.e. it uniquely exploits someone).
+
+        An agent that is the best counter to another league member still
+        provides valuable training signal even if the live agents dominate it.
+        """
+        remaining = [
+            a for a in self.agents
+            if a.agent_id != candidate.agent_id
+            and a.agent_id not in already_removing
+        ]
+        if not remaining:
+            return False
+
+        for target in remaining:
+            candidate_wr = self.payoff.get_win_rate(
+                candidate.agent_id, target.agent_id
+            )
+            # Check if any other remaining agent beats this target more
+            best_other_wr = max(
+                (self.payoff.get_win_rate(other.agent_id, target.agent_id)
+                 for other in remaining
+                 if other.agent_id != target.agent_id),
+                default=0.0,
+            )
+            if candidate_wr > best_other_wr and candidate_wr > 0.5:
+                return True
+        return False
 
     def _score_by_id(self, agent_id: str) -> float:
         """Look up quality score by agent ID."""
@@ -503,6 +603,7 @@ class League:
         return {
             "next_id": self._next_id,
             "last_prune_battle": self._last_prune_battle,
+            "live_agent_ids": self.live_agent_ids,
             "agents": [
                 {
                     "agent_id": a.agent_id,
@@ -521,6 +622,7 @@ class League:
     def load_state_dict(self, state: dict):
         self._next_id = state["next_id"]
         self._last_prune_battle = state.get("last_prune_battle", 0)
+        self.live_agent_ids = state.get("live_agent_ids", [])
         self.payoff.load_state_dict(state["payoff"])
 
         self.agents = []
