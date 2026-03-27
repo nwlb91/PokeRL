@@ -119,6 +119,7 @@ class PokeRLApp(tk.Tk):
         self.team1_var = tk.StringVar(value="teams/team1.txt")
         self.team2_var = tk.StringVar(value="teams/team2.txt")
         self.checkpoint_var = tk.StringVar(value="")
+        self.fresh_start_var = tk.BooleanVar(value=False)
         self.output_var = tk.StringVar(value="checkpoints")
         self.format_var = tk.StringVar(value="gen9nationaldexmonotype")
         self.battles_var = tk.IntVar(value=100000)
@@ -187,6 +188,10 @@ class PokeRLApp(tk.Tk):
         self._file_row(files, "Team 1:", self.team1_var, 0)
         self._file_row(files, "Team 2:", self.team2_var, 1)
         self._file_row(files, "Resume from checkpoint:", self.checkpoint_var, 2, optional=True)
+        ttk.Checkbutton(
+            files, text="Fresh start (reset exploration)",
+            variable=self.fresh_start_var,
+        ).grid(row=2, column=3, sticky="w", **PADDING)
         self._dir_row(files, "Output folder:", self.output_var, 3)
 
         # --- Hyperparameters ---
@@ -526,7 +531,8 @@ class PokeRLApp(tk.Tk):
                             plateau_detector: "PlateauDetector | None" = None,
                             metrics_history: "list | None" = None,
                             greedy_eval_results: "list | None" = None,
-                            train_wr_history: "list | None" = None):
+                            train_wr_history: "list | None" = None,
+                            baseline_eval_results: "list | None" = None):
         """Update progress bar, time labels, and training charts."""
         pct = battle_count / total_battles * 100 if total_battles else 0
         self.train_progress["value"] = pct
@@ -545,18 +551,30 @@ class PokeRLApp(tk.Tk):
             self.train_eta_var.set("ETA: --")
 
         # Update summary stat labels
-        self._update_stat_labels(metrics_history, greedy_eval_results, train_wr_history)
+        self._update_stat_labels(metrics_history, greedy_eval_results, train_wr_history,
+                                 baseline_eval_results)
 
         # Update all training charts
-        self._update_training_charts(plateau_detector, metrics_history, greedy_eval_results, train_wr_history)
+        self._update_training_charts(plateau_detector, metrics_history, greedy_eval_results,
+                                     train_wr_history, baseline_eval_results)
 
     def _update_stat_labels(self, metrics_history: "list | None",
                             greedy_eval_results: "list | None",
-                            train_wr_history: "list | None" = None):
+                            train_wr_history: "list | None" = None,
+                            baseline_eval_results: "list | None" = None):
         """Update the summary stat labels with latest values."""
+        gwr_str = ""
         if greedy_eval_results:
             _, gwr = greedy_eval_results[-1]
-            self.stat_greedy_wr_var.set(f"Greedy WR: {gwr:.1%}")
+            gwr_str = f"Greedy WR: {gwr:.1%}"
+        if baseline_eval_results:
+            _, bwr = baseline_eval_results[-1]
+            if gwr_str:
+                gwr_str += f" | Baseline: {bwr:.1%}"
+            else:
+                gwr_str = f"Baseline WR: {bwr:.1%}"
+        if gwr_str:
+            self.stat_greedy_wr_var.set(gwr_str)
         if train_wr_history:
             _, twr = train_wr_history[-1]
             self.stat_train_wr_var.set(f"Train WR: {twr:.1%}")
@@ -571,7 +589,8 @@ class PokeRLApp(tk.Tk):
     def _update_training_charts(self, detector: "PlateauDetector | None",
                                 metrics_history: "list | None",
                                 greedy_eval_results: "list | None",
-                                train_wr_history: "list | None" = None):
+                                train_wr_history: "list | None" = None,
+                                baseline_eval_results: "list | None" = None):
         """Redraw all four training charts."""
         ax_wr, ax_loss, ax_entropy, ax_ev = (
             self._axes[0, 0], self._axes[0, 1],
@@ -628,10 +647,19 @@ class PokeRLApp(tk.Tk):
             ax_wr.plot(ge_battles, ge_wrs, color="#ff7f0e", linewidth=1.5,
                        marker="o", markersize=3, label="Greedy WR")
 
+        # Overlay baseline eval win rate (absolute skill measure)
+        if baseline_eval_results and len(baseline_eval_results) > 0:
+            bl_battles = [r[0] for r in baseline_eval_results]
+            bl_wrs = [r[1] for r in baseline_eval_results]
+            ax_wr.plot(bl_battles, bl_wrs, color="#2ca02c", linewidth=1.5,
+                       marker="s", markersize=3, label="Baseline WR")
+
         handles = [
             plt.Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="Train WR"),
             plt.Line2D([0], [0], color="#ff7f0e", linewidth=1.5, marker="o",
                        markersize=3, label="Greedy WR"),
+            plt.Line2D([0], [0], color="#2ca02c", linewidth=1.5, marker="s",
+                       markersize=3, label="Baseline WR"),
             Patch(facecolor="#d62728", alpha=0.25, label="Plateau"),
         ]
         ax_wr.legend(handles=handles, fontsize=7, loc="upper left")
@@ -715,6 +743,8 @@ class PokeRLApp(tk.Tk):
         if ckpt:
             kwargs["resume"] = True
             kwargs["resume_path"] = ckpt
+            if self.fresh_start_var.get():
+                kwargs["fresh_start"] = True
         kwargs.update(overrides)
         return Config(**kwargs)
 
@@ -872,11 +902,11 @@ class PokeRLApp(tk.Tk):
 
         def _progress_cb(battle_count, total_battles, plateau_detector=None,
                          metrics_history=None, greedy_eval_results=None,
-                         train_wr_history=None):
+                         train_wr_history=None, baseline_eval_results=None):
             self.after(0, lambda bc=battle_count, tb=total_battles, pd=plateau_detector,
                               mh=metrics_history, ge=greedy_eval_results,
-                              twh=train_wr_history:
-                       self._on_progress_update(bc, tb, pd, mh, ge, twh))
+                              twh=train_wr_history, ber=baseline_eval_results:
+                       self._on_progress_update(bc, tb, pd, mh, ge, twh, ber))
 
         def train_thread():
             try:

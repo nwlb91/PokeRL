@@ -54,8 +54,14 @@ class Config:
 
     # --- Best-model tracking & regression protection ---
     best_model_tracking: bool = True
+    regression_rollback_enabled: bool = False  # rollback on regression (harmful in self-play)
     regression_threshold: float = 0.08    # WR drop below best that triggers rollback
     regression_eval_window: int = 3       # consecutive bad evals before rollback
+
+    # --- Baseline evaluation (absolute skill measure) ---
+    baseline_eval_enabled: bool = True    # evaluate current agent vs frozen initial snapshot
+    baseline_eval_interval: int = 0       # 0 = reuse greedy_eval_interval
+    baseline_eval_battles: int = 50       # number of battles per baseline eval
 
     # --- AlphaStar League ---
     league_size: int = 20  # max agents in the league
@@ -95,6 +101,7 @@ class Config:
     checkpoint_dir: str = "checkpoints"
     resume: bool = False
     resume_path: Optional[str] = None
+    fresh_start: bool = False  # load weights from checkpoint but reset schedules & exploration
 
     # --- Showdown server ---
     server_url: str = "localhost"

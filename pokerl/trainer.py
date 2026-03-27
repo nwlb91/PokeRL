@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
+import torch.optim as optim
 
 from poke_env.ps_client.server_configuration import (
     LocalhostServerConfiguration,
@@ -85,6 +86,11 @@ class Trainer:
         self._league_opponent_agent: Optional[PPOAgent] = None
         self._league_opponent_player: Optional[RLPlayer] = None
         self._league_opponent_id: Optional[str] = None
+
+        # Baseline evaluation (absolute skill measure)
+        self._baseline_agent: Optional[PPOAgent] = None
+        self._baseline_player: Optional[RLPlayer] = None
+        self.baseline_eval_results: deque = deque(maxlen=5000)
 
         # Best-model tracking and regression protection
         self.best_eval_win_rate: float = 0.0
@@ -247,6 +253,50 @@ class Trainer:
         self.greedy_eval_results.append((self.battle_count, wr))
         return wr
 
+    def _init_baseline(self):
+        """Freeze a copy of agent1 as a baseline for absolute skill measurement."""
+        self._baseline_agent = PPOAgent(self.config, agent_id="baseline")
+        self._baseline_agent.load_weights_only(self.agent1.get_state_dict())
+        self._baseline_agent.set_eval()
+        self._baseline_player = create_player(
+            agent=self._baseline_agent,
+            config=self.config,
+            team_str=self.team1_str,
+            collect_data=False,
+            deterministic=False,
+            max_concurrent=1,
+            server_configuration=self.server_config,
+        )
+        logger.info("Baseline agent frozen for absolute skill evaluation")
+
+    async def _run_baseline_eval(self) -> float:
+        """Run evaluation battles between current agent1 and the frozen baseline.
+
+        Returns win rate for the current agent1 (higher = improving).
+        """
+        # Create an eval player for agent1 (reuse the existing one)
+        player1 = self._get_or_create_eval_player1()
+        player2 = self._baseline_player
+
+        self.agent1.set_eval()
+
+        wins_before = player1.n_won_battles
+        total_before = player1.n_finished_battles
+
+        n = self.config.baseline_eval_battles
+        await player1.battle_against(player2, n_battles=n)
+
+        wins_after = player1.n_won_battles
+        total_after = player1.n_finished_battles
+        played = total_after - total_before
+        wins = wins_after - wins_before
+
+        self.agent1.set_train()
+
+        wr = wins / played if played > 0 else 0.5
+        self.baseline_eval_results.append((self.battle_count, wr))
+        return wr
+
     def resume_if_available(self):
         """Resume from latest checkpoint if available."""
         if self.config.resume:
@@ -263,9 +313,70 @@ class Trainer:
                 )
             logger.info(f"Resumed from battle {self.battle_count}")
 
+    def _fresh_start_from_checkpoint(self):
+        """Load network weights from checkpoint but reset all training state.
+
+        This keeps the agent's learned policy while resetting exploration
+        (entropy annealing), learning rate schedules, and optimizer momentum
+        so training can resume as if from scratch.
+        """
+        # First, do a normal resume to load network weights
+        self.resume_if_available()
+
+        cfg = self.config
+
+        # Reset battle count so entropy annealing and LR warmup restart
+        self.battle_count = 0
+
+        # Reset optimizers and LR schedulers for both agents
+        for agent in (self.agent1, self.agent2):
+            agent.battle_optimizer = optim.Adam(
+                agent.battle_net.parameters(), lr=cfg.lr
+            )
+            agent.preview_optimizer = optim.Adam(
+                agent.preview_net.parameters(), lr=cfg.lr
+            )
+            agent.battle_lr_scheduler = agent._create_lr_scheduler(
+                agent.battle_optimizer
+            )
+            agent.preview_lr_scheduler = agent._create_lr_scheduler(
+                agent.preview_optimizer
+            )
+            agent.total_battles = 0
+            agent.total_updates = 0
+            agent.wins = 0
+            agent.losses = 0
+
+        # Reset trainer tracking state
+        self.recent_results = []
+        self.greedy_eval_results = deque(maxlen=5000)
+        self.train_wr_history = deque(maxlen=5000)
+        self.metrics_history = deque(maxlen=5000)
+        self.baseline_eval_results = deque(maxlen=5000)
+        self.best_eval_win_rate = 0.0
+        self.regression_counter = 0
+        self._entropy_bump_until = 0
+        self._latest_explained_variance = 0.0
+        self._latest_metrics = {}
+        self.plateau_detector = PlateauDetector(
+            window=20, patience=10, alpha=0.05, cv_threshold=0.10,
+        )
+
+        logger.info(
+            "Fresh start from checkpoint: network weights loaded, "
+            "schedules and exploration reset"
+        )
+
     async def train(self):
         """Main training loop."""
-        self.resume_if_available()
+        if self.config.fresh_start and self.config.resume:
+            self._fresh_start_from_checkpoint()
+        else:
+            self.resume_if_available()
+
+        # Freeze a baseline snapshot for absolute skill evaluation
+        if self.config.baseline_eval_enabled:
+            self._init_baseline()
 
         logger.info(
             f"Starting training: {self.config.total_battles} battles, "
@@ -309,7 +420,7 @@ class Trainer:
                     f"mean_pred={wp_metrics.get('wp_mean_pred', 0):.3f}"
                 )
 
-            # Periodic greedy evaluation
+            # Periodic greedy evaluation (agent1 vs agent2)
             if (self.config.greedy_eval_interval > 0 and
                     self.battle_count % self.config.greedy_eval_interval == 0):
                 greedy_wr = await self._run_greedy_eval()
@@ -318,22 +429,39 @@ class Trainer:
                     f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
                 )
 
-                # Best-model tracking and regression rollback
+                # Baseline evaluation (absolute skill measure)
+                baseline_wr = None
+                if (self.config.baseline_eval_enabled
+                        and self._baseline_agent is not None):
+                    bl_interval = (self.config.baseline_eval_interval
+                                   or self.config.greedy_eval_interval)
+                    if bl_interval > 0 and self.battle_count % bl_interval == 0:
+                        baseline_wr = await self._run_baseline_eval()
+                        logger.info(
+                            f"  Baseline eval at battle {self.battle_count}: "
+                            f"WR={baseline_wr:.1%} ({self.config.baseline_eval_battles} battles)"
+                        )
+
+                # Best-model tracking: use baseline WR (absolute skill) when
+                # available, otherwise fall back to greedy WR.
                 if self.config.best_model_tracking:
-                    if greedy_wr > self.best_eval_win_rate:
-                        self.best_eval_win_rate = greedy_wr
+                    tracking_wr = baseline_wr if baseline_wr is not None else greedy_wr
+
+                    if tracking_wr > self.best_eval_win_rate:
+                        self.best_eval_win_rate = tracking_wr
                         self.regression_counter = 0
                         self.ckpt_manager.save_best(
                             self.agent1, self.agent2,
                             self.league, self.wp_estimator,
-                            self.battle_count, greedy_wr,
+                            self.battle_count, tracking_wr,
                         )
-                    elif greedy_wr < self.best_eval_win_rate - self.config.regression_threshold:
+                    elif (self.config.regression_rollback_enabled
+                          and tracking_wr < self.best_eval_win_rate - self.config.regression_threshold):
                         self.regression_counter += 1
                         logger.warning(
                             f"Regression signal {self.regression_counter}/"
                             f"{self.config.regression_eval_window}: "
-                            f"current={greedy_wr:.1%}, best={self.best_eval_win_rate:.1%}"
+                            f"current={tracking_wr:.1%}, best={self.best_eval_win_rate:.1%}"
                         )
                         if self.regression_counter >= self.config.regression_eval_window:
                             logger.warning(
@@ -392,6 +520,7 @@ class Trainer:
                     self.metrics_history,
                     self.greedy_eval_results,
                     self.train_wr_history,
+                    self.baseline_eval_results,
                 )
 
         # Final checkpoint
@@ -636,6 +765,10 @@ class Trainer:
                 "explained_variance": self._latest_explained_variance,
                 "agent1_wins": self.agent1.wins,
                 "agent2_wins": self.agent2.wins,
+                "baseline_win_rate": (
+                    self.baseline_eval_results[-1][1]
+                    if self.baseline_eval_results else None
+                ),
             },
         )
 
@@ -658,6 +791,9 @@ class Trainer:
         if self.greedy_eval_results:
             _, last_greedy_wr = self.greedy_eval_results[-1]
             greedy_str = f" | Greedy WR: {last_greedy_wr:.1%}"
+        if self.baseline_eval_results:
+            _, last_baseline_wr = self.baseline_eval_results[-1]
+            greedy_str += f" | Baseline WR: {last_baseline_wr:.1%}"
 
         # Track training win rate history for GUI charting
         self.train_wr_history.append((self.battle_count, wr))
