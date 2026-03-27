@@ -64,6 +64,7 @@ class Trainer:
 
         # Battle counter
         self.battle_count = 0
+        self._consecutive_failures = 0
 
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
@@ -524,8 +525,25 @@ class Trainer:
                     self._n_concurrent,
                     self.config.total_battles - self.battle_count,
                 )
-            await self._run_battle_batch(batch_size)
-            self.battle_count += batch_size
+            battles_completed = await self._run_battle_batch(batch_size)
+            if battles_completed == 0:
+                self._consecutive_failures += 1
+                logger.warning(
+                    f"Battle batch returned 0 completed battles "
+                    f"(requested {batch_size}, consecutive failures: "
+                    f"{self._consecutive_failures}). The battle may have "
+                    "failed to register with poke-env."
+                )
+                if self._consecutive_failures >= 10:
+                    raise RuntimeError(
+                        f"Aborting training: {self._consecutive_failures} consecutive "
+                        "battle batches completed 0 battles. Check the Showdown "
+                        "server connection and poke-env version."
+                    )
+                continue
+            else:
+                self._consecutive_failures = 0
+            self.battle_count += battles_completed
 
             # PPO updates when buffer is full enough
             if len(self.agent1.battle_buffer) >= self.config.rollout_steps:
@@ -661,12 +679,14 @@ class Trainer:
         self._checkpoint_and_snapshot()
         logger.info("Training complete!")
 
-    async def _run_battle_batch(self, n_battles: int):
+    async def _run_battle_batch(self, n_battles: int) -> int:
         """Run n_battles concurrently using poke-env's built-in concurrency.
 
         Selects opponents from the league when available, using the
         configured main/PFSP/self-play distribution.  When a league
         opponent is selected, only the training player collects data.
+
+        Returns the number of battles that actually completed.
         """
         # Decide which training player and opponent to use this batch.
         # Alternate which agent gets league exposure each batch.
@@ -783,6 +803,8 @@ class Trainer:
 
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
+
+        return battles_played
 
     def _apply_reward_shaping(self, player: RLPlayer):
         """Apply vectorized win probability reward shaping."""
