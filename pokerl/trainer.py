@@ -292,6 +292,19 @@ class Trainer:
         )
         logger.info("Per-team baseline agents frozen for absolute skill evaluation")
 
+        # Save initial best snapshots so both best_team*.pt files exist from
+        # the start.  Promotions will overwrite them once agents improve.
+        t1_path = self.ckpt_manager.checkpoint_dir / "best_team1.pt"
+        t2_path = self.ckpt_manager.checkpoint_dir / "best_team2.pt"
+        if not t1_path.exists():
+            self.ckpt_manager.save_best_team(
+                self.agent1, 0, self.battle_count, 0.5,
+            )
+        if not t2_path.exists():
+            self.ckpt_manager.save_best_team(
+                self.agent2, 1, self.battle_count, 0.5,
+            )
+
     async def _run_baseline_eval(self) -> Tuple[float, float]:
         """Evaluate both agents against the opposing team's baseline.
 
