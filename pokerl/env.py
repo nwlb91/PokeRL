@@ -5,11 +5,13 @@ This module provides a PokeRL-specific environment that:
   - Handles team preview with learned lead selection
   - Integrates with the PPO agent's action space
   - Provides win probability-shaped rewards
+  - Supports concurrent battles via per-battle state isolation
 """
 
 import asyncio
 import logging
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -37,12 +39,45 @@ from pokerl.features import embed_battle, embed_team_preview
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _BattleEpisodeState:
+    """Per-battle episode state for rollout collection and reward shaping."""
+    battle_observations: list = field(default_factory=list)
+    prev_obs: Optional[np.ndarray] = None
+    prev_action: Optional[int] = None
+    prev_action_mask: Optional[np.ndarray] = None
+    prev_log_prob: Optional[float] = None
+    prev_value: Optional[float] = None
+    team_preview_obs: Optional[np.ndarray] = None
+    team_preview_mask: Optional[np.ndarray] = None
+    team_preview_action: Optional[int] = None
+    team_preview_log_prob: Optional[float] = None
+    team_preview_value: Optional[float] = None
+    own_fainted: int = 0
+    opp_fainted: int = 0
+    own_total_hp_lost: float = 0.0
+    opp_total_hp_lost: float = 0.0
+    prev_own_hp: Optional[float] = None
+    prev_opp_hp: Optional[float] = None
+
+
+@dataclass
+class CompletedEpisode:
+    """A completed battle episode with all collected data."""
+    battle_tag: str
+    state: _BattleEpisodeState
+    won: bool
+
+
 class RLPlayer(Player):
     """A poke-env Player controlled by a PPO agent.
 
     Delegates all decisions to the agent's neural networks:
       - Team preview: uses TeamPreviewNet
       - Battle moves: uses PolicyValueNet with action masking
+
+    Supports concurrent battles by isolating per-battle state
+    in a dict keyed by battle.battle_tag.
     """
 
     def __init__(
@@ -59,28 +94,18 @@ class RLPlayer(Player):
         self.collect_data = collect_data
         self.deterministic = deterministic
 
-        # Per-battle state for rollout collection
-        self._battle_observations = []
-        self._prev_obs = None
-        self._prev_action = None
-        self._prev_action_mask = None
-        self._prev_log_prob = None
-        self._prev_value = None
-        self._team_preview_obs = None
-        self._team_preview_mask = None
-        self._team_preview_action = None
-        self._team_preview_log_prob = None
-        self._team_preview_value = None
+        # Per-battle state keyed by battle.battle_tag
+        self._episode_states: Dict[str, _BattleEpisodeState] = {}
 
-        # KO tracking for reward shaping
-        self._own_fainted = 0
-        self._opp_fainted = 0
+        # Completed episodes ready for the trainer to consume
+        self._completed_episodes: List[CompletedEpisode] = []
 
-        # Damage tracking for reward shaping
-        self._own_total_hp_lost = 0.0
-        self._opp_total_hp_lost = 0.0
-        self._prev_own_hp: Optional[float] = None
-        self._prev_opp_hp: Optional[float] = None
+    def _get_episode_state(self, battle: Battle) -> _BattleEpisodeState:
+        """Get or create the episode state for a specific battle."""
+        tag = battle.battle_tag
+        if tag not in self._episode_states:
+            self._episode_states[tag] = _BattleEpisodeState()
+        return self._episode_states[tag]
 
     def teampreview(self, battle: Battle) -> str:
         """Select a lead using the team preview network."""
@@ -93,11 +118,12 @@ class RLPlayer(Player):
 
         # Store for later reward assignment
         if self.collect_data:
-            self._team_preview_obs = obs
-            self._team_preview_mask = mask
-            self._team_preview_action = action
-            self._team_preview_log_prob = log_prob
-            self._team_preview_value = value
+            state = self._get_episode_state(battle)
+            state.team_preview_obs = obs
+            state.team_preview_mask = mask
+            state.team_preview_action = action
+            state.team_preview_log_prob = log_prob
+            state.team_preview_value = value
 
         return team_preview_to_order(action, battle)
 
@@ -108,33 +134,34 @@ class RLPlayer(Player):
 
         # Store observation for win probability training
         if self.collect_data:
-            self._battle_observations.append(obs)
+            state = self._get_episode_state(battle)
+            state.battle_observations.append(obs)
 
             # Track KO counts for reward shaping
-            self._own_fainted = sum(1 for m in battle.team.values() if m.fainted)
-            self._opp_fainted = sum(
+            state.own_fainted = sum(1 for m in battle.team.values() if m.fainted)
+            state.opp_fainted = sum(
                 1 for m in battle.opponent_team.values() if m.fainted
             )
 
             # Track damage dealt/received for reward shaping
             own_hp = sum(m.current_hp_fraction for m in battle.team.values())
             opp_hp = sum(m.current_hp_fraction for m in battle.opponent_team.values())
-            if self._prev_own_hp is not None:
-                own_delta = self._prev_own_hp - own_hp
-                opp_delta = self._prev_opp_hp - opp_hp
-                self._own_total_hp_lost += max(0.0, own_delta)
-                self._opp_total_hp_lost += max(0.0, opp_delta)
-            self._prev_own_hp = own_hp
-            self._prev_opp_hp = opp_hp
+            if state.prev_own_hp is not None:
+                own_delta = state.prev_own_hp - own_hp
+                opp_delta = state.prev_opp_hp - opp_hp
+                state.own_total_hp_lost += max(0.0, own_delta)
+                state.opp_total_hp_lost += max(0.0, opp_delta)
+            state.prev_own_hp = own_hp
+            state.prev_opp_hp = opp_hp
 
         # If we have a previous step, record its reward (0 for mid-battle)
-        if self.collect_data and self._prev_obs is not None:
+        if self.collect_data and (state := self._episode_states.get(battle.battle_tag)) and state.prev_obs is not None:
             step = RolloutStep(
-                obs=self._prev_obs,
-                action=self._prev_action,
-                action_mask=self._prev_action_mask,
-                log_prob=self._prev_log_prob,
-                value=self._prev_value,
+                obs=state.prev_obs,
+                action=state.prev_action,
+                action_mask=state.prev_action_mask,
+                log_prob=state.prev_log_prob,
+                value=state.prev_value,
                 reward=0.0,  # will be reshaped later
                 done=False,
             )
@@ -146,31 +173,51 @@ class RLPlayer(Player):
 
         # Store for next step
         if self.collect_data:
-            self._prev_obs = obs
-            self._prev_action = action
-            self._prev_action_mask = action_mask
-            self._prev_log_prob = log_prob
-            self._prev_value = value
+            state = self._get_episode_state(battle)
+            state.prev_obs = obs
+            state.prev_action = action
+            state.prev_action_mask = action_mask
+            state.prev_log_prob = log_prob
+            state.prev_value = value
 
         order = action_to_order(action, battle, self.config)
         return order
 
-    def on_battle_finished(self, won: bool, terminal_reward: float):
-        """Called after a battle ends to finalize rollout data.
+    def _battle_finished_callback(self, battle: AbstractBattle):
+        """Called by poke-env when an individual battle finishes.
 
-        Records the final step with the terminal reward.
+        Moves the episode state from active to completed so the trainer
+        can process each battle individually, even during concurrent execution.
+        """
+        tag = battle.battle_tag
+        state = self._episode_states.pop(tag, None)
+        if state is None:
+            # Non-data-collecting player or unknown battle
+            return
+
+        self._completed_episodes.append(
+            CompletedEpisode(battle_tag=tag, state=state, won=battle.won)
+        )
+
+    def finalize_episode(self, episode: CompletedEpisode, terminal_reward: float):
+        """Finalize a completed episode by recording rollout steps.
+
+        Called by the trainer after computing the terminal reward
+        (including KO/damage shaping).
         """
         if not self.collect_data:
             return
 
+        state = episode.state
+
         # Record final battle step
-        if self._prev_obs is not None:
+        if state.prev_obs is not None:
             step = RolloutStep(
-                obs=self._prev_obs,
-                action=self._prev_action,
-                action_mask=self._prev_action_mask,
-                log_prob=self._prev_log_prob,
-                value=self._prev_value,
+                obs=state.prev_obs,
+                action=state.prev_action,
+                action_mask=state.prev_action_mask,
+                log_prob=state.prev_log_prob,
+                value=state.prev_value,
                 reward=terminal_reward,
                 done=True,
             )
@@ -178,13 +225,13 @@ class RLPlayer(Player):
 
         # Record team preview step (reward = terminal reward, since lead
         # choice affects the entire game outcome)
-        if self._team_preview_obs is not None:
+        if state.team_preview_obs is not None:
             step = RolloutStep(
-                obs=self._team_preview_obs,
-                action=self._team_preview_action,
-                action_mask=self._team_preview_mask,
-                log_prob=self._team_preview_log_prob,
-                value=self._team_preview_value,
+                obs=state.team_preview_obs,
+                action=state.team_preview_action,
+                action_mask=state.team_preview_mask,
+                log_prob=state.team_preview_log_prob,
+                value=state.team_preview_value,
                 reward=terminal_reward,
                 done=True,
             )
@@ -192,52 +239,46 @@ class RLPlayer(Player):
 
         # Update agent stats
         self.agent.total_battles += 1
-        if won:
+        if episode.won:
             self.agent.wins += 1
         else:
             self.agent.losses += 1
 
-        self._reset_episode_state()
+    def pop_completed_episodes(self) -> List[CompletedEpisode]:
+        """Return and clear all completed episodes.
 
-    def get_battle_observations(self):
-        """Return collected observations for win probability training."""
-        return self._battle_observations
-
-    def get_damage_differential(self) -> float:
-        """Return normalised damage differential: (opp HP lost - own HP lost) / 6.
-
-        Positive means we dealt more damage than we received.  Each side can
-        lose at most 6 HP-fractions (one per Pokémon), so dividing by 6 keeps
-        the value in [-1, 1].
+        The trainer calls this after battle_against() to process
+        each completed battle individually.
         """
-        return (self._opp_total_hp_lost - self._own_total_hp_lost) / 6.0
+        episodes = self._completed_episodes
+        self._completed_episodes = []
+        return episodes
 
-    def get_ko_differential(self) -> float:
-        """Return normalised KO differential: (our KOs - their KOs) / 6.
+    @staticmethod
+    def get_ko_differential(episode: CompletedEpisode) -> float:
+        """Return normalised KO differential for a completed episode.
 
         Positive means we knocked out more of theirs than they knocked out
         of ours.  Used to provide gradient signal even in hopeless matchups.
         """
-        return (self._opp_fainted - self._own_fainted) / 6.0
+        s = episode.state
+        return (s.opp_fainted - s.own_fainted) / 6.0
 
-    def _reset_episode_state(self):
-        self._battle_observations = []
-        self._prev_obs = None
-        self._prev_action = None
-        self._prev_action_mask = None
-        self._prev_log_prob = None
-        self._prev_value = None
-        self._team_preview_obs = None
-        self._team_preview_mask = None
-        self._team_preview_action = None
-        self._team_preview_log_prob = None
-        self._team_preview_value = None
-        self._own_fainted = 0
-        self._opp_fainted = 0
-        self._own_total_hp_lost = 0.0
-        self._opp_total_hp_lost = 0.0
-        self._prev_own_hp = None
-        self._prev_opp_hp = None
+    @staticmethod
+    def get_damage_differential(episode: CompletedEpisode) -> float:
+        """Return normalised damage differential for a completed episode.
+
+        Positive means we dealt more damage than we received.  Each side can
+        lose at most 6 HP-fractions (one per Pokemon), so dividing by 6 keeps
+        the value in [-1, 1].
+        """
+        s = episode.state
+        return (s.opp_total_hp_lost - s.own_total_hp_lost) / 6.0
+
+    @staticmethod
+    def get_battle_observations(episode: CompletedEpisode) -> list:
+        """Return collected observations for win probability training."""
+        return episode.state.battle_observations
 
 
 def load_team(path: str) -> str:

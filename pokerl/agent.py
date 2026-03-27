@@ -209,7 +209,7 @@ class PPOAgent:
         Returns:
             (action, log_prob, value)
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
 
@@ -232,7 +232,7 @@ class PPOAgent:
         Returns:
             (action, log_prob, value)
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(mask).unsqueeze(0).to(self.device)
 

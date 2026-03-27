@@ -101,7 +101,7 @@ class Config:
     # --- Training ---
     total_battles: int = 100000
     infinite_training: bool = False       # ignore total_battles, train forever
-    num_parallel_battles: int = 1
+    num_parallel_battles: int = 4
     device: str = "cpu"
 
     # --- Plateau response ---

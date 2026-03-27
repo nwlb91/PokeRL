@@ -27,7 +27,7 @@ from poke_env.ps_client.server_configuration import (
 from pokerl.agent import PPOAgent
 from pokerl.checkpoint import CheckpointManager
 from pokerl.config import Config
-from pokerl.env import RLPlayer, create_player, load_team
+from pokerl.env import CompletedEpisode, RLPlayer, create_player, load_team
 from pokerl.league import League
 from pokerl.plateau import PlateauDetector, PlateauInfo
 from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
@@ -117,15 +117,7 @@ class Trainer:
             cv_threshold=0.10,
         )
 
-        # Concurrency — batch post-processing currently assumes one battle at a
-        # time (KO/damage tracking, observation lists, and win attribution are
-        # per-player singletons that get overwritten across concurrent battles).
-        if config.num_parallel_battles > 1:
-            logger.warning(
-                "num_parallel_battles > 1 is not yet supported correctly "
-                "(per-battle reward data is lost). Forcing to 1."
-            )
-        self._n_concurrent = 1
+        self._n_concurrent = config.num_parallel_battles
 
     def _get_or_create_player1(self) -> RLPlayer:
         """Reuse persistent player1 or create a new one."""
@@ -162,7 +154,7 @@ class Trainer:
                 team_str=self.team1_str,
                 collect_data=False,
                 deterministic=False,
-                max_concurrent=1,
+                max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
         return self._eval_player1
@@ -176,7 +168,7 @@ class Trainer:
                 team_str=self.team2_str,
                 collect_data=False,
                 deterministic=False,
-                max_concurrent=1,
+                max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
         return self._eval_player2
@@ -710,64 +702,55 @@ class Trainer:
             opponent_player = live_opponent_fn()
             opponent_agent_id = live_agent.agent_id
 
-        # Snapshot battle counts before this batch
-        tp_wins_before = training_player.n_won_battles
-        tp_total_before = training_player.n_finished_battles
-
         await training_player.battle_against(opponent_player, n_battles=n_battles)
 
-        # Compute batch results
-        tp_wins_after = training_player.n_won_battles
-        tp_total_after = training_player.n_finished_battles
-        battles_played = tp_total_after - tp_total_before
-        batch_wins = tp_wins_after - tp_wins_before
-
-        # Guard: per-battle state (KO/damage tracking, observations) is reset
-        # by on_battle_finished(), so processing >1 battle here would yield
-        # zeroed reward shaping for all battles after the first.
-        assert battles_played <= 1, (
-            f"Batch returned {battles_played} battles but reward tracking only "
-            "supports 1 at a time. Fix the loop before enabling concurrency."
-        )
-
-        # Process each completed battle
+        # Process each completed battle individually via per-battle state
         ko_w = self.config.ko_reward_weight
         dmg_w = self.config.damage_reward_weight
 
-        for i in range(battles_played):
-            tp_won = i < batch_wins  # approximate: first batch_wins were wins
+        tp_episodes = training_player.pop_completed_episodes()
+        opp_episodes = (
+            opponent_player.pop_completed_episodes() if not use_league else []
+        )
 
+        # Build a lookup for opponent episodes by battle_tag so we can
+        # pair them with the training player's episodes
+        opp_by_tag = {ep.battle_tag: ep for ep in opp_episodes}
+
+        for tp_ep in tp_episodes:
+            tp_won = tp_ep.won
             tp_base = 1.0 if tp_won else -1.0
 
             tp_reward = (
                 tp_base
-                + ko_w * training_player.get_ko_differential()
-                + dmg_w * training_player.get_damage_differential()
+                + ko_w * RLPlayer.get_ko_differential(tp_ep)
+                + dmg_w * RLPlayer.get_damage_differential(tp_ep)
             )
 
             # Apply reward shaping and finalize for training player
-            self._apply_reward_shaping(training_player)
-            training_player.on_battle_finished(tp_won, tp_reward)
+            self._apply_reward_shaping(training_player, tp_ep)
+            training_player.finalize_episode(tp_ep, tp_reward)
 
             # If fighting the live opponent, also process their data
-            if not use_league:
+            opp_ep = opp_by_tag.get(tp_ep.battle_tag)
+            if opp_ep is not None:
                 opp_base = -tp_base
                 opp_reward = (
                     opp_base
-                    + ko_w * opponent_player.get_ko_differential()
-                    + dmg_w * opponent_player.get_damage_differential()
+                    + ko_w * RLPlayer.get_ko_differential(opp_ep)
+                    + dmg_w * RLPlayer.get_damage_differential(opp_ep)
                 )
-                self._apply_reward_shaping(opponent_player)
-                opponent_player.on_battle_finished(not tp_won, opp_reward)
+                self._apply_reward_shaping(opponent_player, opp_ep)
+                opponent_player.finalize_episode(opp_ep, opp_reward)
 
                 # Store WP trajectory for live opponent too
                 self.wp_estimator.store_trajectory(
-                    opponent_player.get_battle_observations(), not tp_won,
+                    RLPlayer.get_battle_observations(opp_ep), not tp_won,
                 )
 
             # Store WP trajectory for training player
             self.wp_estimator.store_trajectory(
-                training_player.get_battle_observations(), tp_won,
+                RLPlayer.get_battle_observations(tp_ep), tp_won,
             )
 
             # Record payoff with correct agent IDs
@@ -784,9 +767,9 @@ class Trainer:
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
 
-    def _apply_reward_shaping(self, player: RLPlayer):
+    def _apply_reward_shaping(self, player: RLPlayer, episode: CompletedEpisode):
         """Apply vectorized win probability reward shaping."""
-        observations = player.get_battle_observations()
+        observations = RLPlayer.get_battle_observations(episode)
         buffer = player.agent.battle_buffer
 
         if len(observations) < 2:
