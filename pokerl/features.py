@@ -270,4 +270,4 @@ def embed_team_preview(battle: Battle) -> np.ndarray:
 
 # Precompute sizes
 BATTLE_OBS_SIZE = 1032
-TEAM_PREVIEW_OBS_SIZE = 664
+TEAM_PREVIEW_OBS_SIZE = 664  # 330 our team + 330 opp team + 1 gen + 3 reserved

@@ -30,6 +30,7 @@ from pokerl.config import Config
 from pokerl.env import RLPlayer, create_player, load_team
 from pokerl.league import League
 from pokerl.plateau import PlateauDetector, PlateauInfo
+from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
 from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
@@ -511,7 +512,7 @@ class Trainer:
             f"concurrent={self._n_concurrent}"
         )
         logger.info(f"Action space size: {self.config.action_size}")
-        logger.info(f"Battle obs size: 1032, Team preview obs size: 664")
+        logger.info(f"Battle obs size: {BATTLE_OBS_SIZE}, Team preview obs size: {TEAM_PREVIEW_OBS_SIZE}")
 
         while self.config.infinite_training or self.battle_count < self.config.total_battles:
             # Run a batch of concurrent battles
