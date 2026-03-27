@@ -66,6 +66,14 @@ class Trainer:
         self.battle_count = 0
         self._batch_counter = 0  # alternates which agent trains vs league
 
+        # Last battle count at which each periodic action ran.
+        # Using "last fired" instead of "% N == 0" so that large batch
+        # sizes (num_parallel_battles > 1) don't cause intervals to be skipped.
+        self._last_checkpoint = 0
+        self._last_greedy_eval = 0
+        self._last_baseline_eval = 0
+        self._last_stats_log = 0
+
         # Stats tracking
         self.recent_results = []  # list of (team1_won: bool)
         self.greedy_eval_results: deque = deque(maxlen=5000)  # (battle_count, win_rate)
@@ -531,8 +539,9 @@ class Trainer:
                 self._update_preview()
 
             # Periodic checkpoint + league snapshot
-            if self.battle_count % self.config.checkpoint_interval == 0:
+            if self.battle_count - self._last_checkpoint >= self.config.checkpoint_interval:
                 self._checkpoint_and_snapshot()
+                self._last_checkpoint = self.battle_count
 
             # Win probability estimator update
             wp_metrics = self.wp_estimator.maybe_update()
@@ -544,7 +553,7 @@ class Trainer:
 
             # Periodic greedy evaluation (agent1 vs agent2)
             if (self.config.greedy_eval_interval > 0 and
-                    self.battle_count % self.config.greedy_eval_interval == 0):
+                    self.battle_count - self._last_greedy_eval >= self.config.greedy_eval_interval):
                 greedy_wr = await self._run_greedy_eval()
                 logger.info(
                     f"  Greedy eval at battle {self.battle_count}: "
@@ -586,13 +595,17 @@ class Trainer:
                         else:
                             self.regression_counter = 0
 
+                self._last_greedy_eval = self.battle_count
+
                 # Per-team baseline evaluation (absolute skill measure)
                 if (self.config.baseline_eval_enabled
                         and self._baseline_agent1 is not None):
                     bl_interval = (self.config.baseline_eval_interval
                                    or self.config.greedy_eval_interval)
-                    if bl_interval > 0 and self.battle_count % bl_interval == 0:
+                    if (bl_interval > 0 and
+                            self.battle_count - self._last_baseline_eval >= bl_interval):
                         wr1, wr2 = await self._run_baseline_eval()
+                        self._last_baseline_eval = self.battle_count
                         margin = self.config.baseline_promotion_margin
                         logger.info(
                             f"  Baseline eval at battle {self.battle_count}: "
@@ -603,7 +616,8 @@ class Trainer:
                         await self._maybe_promote_baselines(wr1, wr2)
 
             # Periodic logging + plateau detection
-            if self.battle_count % 50 == 0:
+            if self.battle_count - self._last_stats_log >= 50:
+                self._last_stats_log = self.battle_count
                 self._log_stats()
 
                 # Feed chosen metric to the plateau detector
