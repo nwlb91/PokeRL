@@ -335,6 +335,9 @@ class Trainer:
             self._baseline_agent1.load_weights_only(self.agent1.get_state_dict())
             self._baseline1_promotions += 1
             promoted = True
+            self.ckpt_manager.save_best_team(
+                self.agent1, 0, self.battle_count, wr1,
+            )
             logger.info(
                 f"Baseline team1 promoted (WR vs BL2={wr1:.1%}, "
                 f"promotion #{self._baseline1_promotions})"
@@ -344,16 +347,19 @@ class Trainer:
             self._baseline_agent2.load_weights_only(self.agent2.get_state_dict())
             self._baseline2_promotions += 1
             promoted = True
+            self.ckpt_manager.save_best_team(
+                self.agent2, 1, self.battle_count, wr2,
+            )
             logger.info(
                 f"Baseline team2 promoted (WR vs BL1={wr2:.1%}, "
                 f"promotion #{self._baseline2_promotions})"
             )
 
         if promoted:
-            self.ckpt_manager.save_best(
+            self.ckpt_manager.save_combined_best(
                 self.agent1, self.agent2,
                 self.league, self.wp_estimator,
-                self.battle_count, min(wr1, wr2),
+                self.battle_count,
             )
 
     def resume_if_available(self):

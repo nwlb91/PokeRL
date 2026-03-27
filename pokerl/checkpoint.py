@@ -155,6 +155,70 @@ class CheckpointManager:
         torch.save(state, best_path)
         logger.info(f"Saved best model (WR={win_rate:.1%}) at battle {battle_count}")
 
+    def save_best_team(
+        self,
+        agent: PPOAgent,
+        team_id: int,
+        battle_count: int,
+        win_rate: float,
+    ):
+        """Save per-team best checkpoint (just this agent's state)."""
+        state = {
+            "agent": agent.get_state_dict(),
+            "battle_count": battle_count,
+            "metadata": {"team_id": team_id, "win_rate": win_rate},
+        }
+        path = self.checkpoint_dir / f"best_team{team_id + 1}.pt"
+        torch.save(state, path)
+        logger.info(
+            f"Saved best team{team_id + 1} agent (WR={win_rate:.1%}) "
+            f"at battle {battle_count}"
+        )
+
+    def save_combined_best(
+        self,
+        agent1: PPOAgent,
+        agent2: PPOAgent,
+        league: League,
+        wp_estimator: WinProbabilityEstimator,
+        battle_count: int,
+    ):
+        """Combine per-team bests into best.pt.
+
+        Uses best_team1.pt/best_team2.pt agent weights when available,
+        falling back to the current agent if no per-team best exists yet.
+        """
+        t1_path = self.checkpoint_dir / "best_team1.pt"
+        t2_path = self.checkpoint_dir / "best_team2.pt"
+
+        if t1_path.exists():
+            a1_state = torch.load(t1_path, map_location="cpu", weights_only=False)["agent"]
+        else:
+            a1_state = agent1.get_state_dict()
+
+        if t2_path.exists():
+            a2_state = torch.load(t2_path, map_location="cpu", weights_only=False)["agent"]
+        else:
+            a2_state = agent2.get_state_dict()
+
+        state = {
+            "agent1": a1_state,
+            "agent2": a2_state,
+            "league": league.get_state_dict(),
+            "wp_estimator": wp_estimator.get_state_dict(),
+            "battle_count": battle_count,
+            "config": {
+                "battle_format": self.config.battle_format,
+                "hidden_size": self.config.hidden_size,
+                "num_layers": self.config.num_layers,
+                "action_size": self.config.action_size,
+            },
+            "metadata": {"combined_best": True, "battle_count": battle_count},
+        }
+        best_path = self.checkpoint_dir / "best.pt"
+        torch.save(state, best_path)
+        logger.info(f"Saved combined best model at battle {battle_count}")
+
     def load_best(
         self,
         agent1: PPOAgent,
