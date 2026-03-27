@@ -145,7 +145,7 @@ def _encode_team_pokemon_into(buf: np.ndarray, offset: int,
         for s in STAT_NAMES:
             buf[o] = base.get(s, 0) / 255.0
             o += 1
-        buf[o] = float(mon.fainted)
+        buf[o] = float(mon.fainted); o += 1
 
 
 def embed_battle(battle: Battle) -> np.ndarray:

@@ -9,7 +9,6 @@ Contains:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
 

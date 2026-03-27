@@ -11,7 +11,7 @@ The estimator is trained on historical battle data:
 
 import random
 from collections import deque
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 import torch

@@ -2,22 +2,17 @@
 """PokeRL GUI — Manage training, evaluation, and Showdown server."""
 
 import asyncio
-import json
 import logging
 import os
-import platform
 import queue
 import shutil
-import signal
 import subprocess
-import sys
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -29,20 +24,16 @@ import torch
 
 from poke_env.ps_client.account_configuration import AccountConfiguration
 from poke_env.ps_client.server_configuration import (
-    LocalhostServerConfiguration,
     ServerConfiguration,
     ShowdownServerConfiguration,
 )
 from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
 from pokerl.agent import PPOAgent
-from pokerl.checkpoint import CheckpointManager
 from pokerl.config import Config
 from pokerl.env import RLPlayer, create_player, load_team
-from pokerl.league import League
 from pokerl.plateau import PlateauDetector
 from pokerl.trainer import Trainer
-from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger("pokerl.gui")
 

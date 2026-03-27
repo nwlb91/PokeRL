@@ -9,7 +9,7 @@ This module provides a PokeRL-specific environment that:
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional, Tuple, Union, Awaitable
+from typing import Any, Optional
 
 import numpy as np
 

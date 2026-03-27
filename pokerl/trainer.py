@@ -12,10 +12,9 @@ Orchestrates:
 import asyncio
 import logging
 import random
-import time
 from collections import deque
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch.optim as optim
@@ -720,6 +719,14 @@ class Trainer:
         tp_total_after = training_player.n_finished_battles
         battles_played = tp_total_after - tp_total_before
         batch_wins = tp_wins_after - tp_wins_before
+
+        # Guard: per-battle state (KO/damage tracking, observations) is reset
+        # by on_battle_finished(), so processing >1 battle here would yield
+        # zeroed reward shaping for all battles after the first.
+        assert battles_played <= 1, (
+            f"Batch returned {battles_played} battles but reward tracking only "
+            "supports 1 at a time. Fix the loop before enabling concurrency."
+        )
 
         # Process each completed battle
         ko_w = self.config.ko_reward_weight

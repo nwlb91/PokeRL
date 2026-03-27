@@ -12,13 +12,11 @@ Also handles team preview lead selection (indices 0-5).
 """
 
 import numpy as np
-from typing import List
 
 from poke_env.battle.battle import Battle
 from poke_env.player.battle_order import (
     BattleOrder,
     DefaultBattleOrder,
-    SingleBattleOrder,
 )
 from poke_env.player.player import Player
 

@@ -7,7 +7,6 @@ Handles saving and loading of:
   - Training progress metadata
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional

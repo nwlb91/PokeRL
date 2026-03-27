@@ -288,29 +288,6 @@ class League:
         selected.selection_count += 1
         return selected, kind
 
-    def select_pfsp_opponent(
-        self, current_agent_id: str, current_team_id: int
-    ) -> Optional[LeagueAgent]:
-        """Select a PFSP opponent from the opposing team."""
-        opponent_team_id = 1 - current_team_id
-        opponents = [a for a in self.agents if a.team_id == opponent_team_id]
-        if not opponents:
-            return None
-        selected = self._pfsp_select(current_agent_id, opponents)
-        selected.selection_count += 1
-        return selected
-
-    def select_self_play_opponent(
-        self, current_team_id: int
-    ) -> Optional[LeagueAgent]:
-        """Select a random historical agent from the same team."""
-        own_agents = [a for a in self.agents if a.team_id == current_team_id]
-        if not own_agents:
-            return None
-        selected = random.choice(own_agents)
-        selected.selection_count += 1
-        return selected
-
     def _pfsp_select(
         self, current_agent_id: str, opponents: List[LeagueAgent]
     ) -> LeagueAgent:
