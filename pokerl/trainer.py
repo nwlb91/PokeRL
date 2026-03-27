@@ -96,6 +96,8 @@ class Trainer:
         self.baseline_eval_results_team2: deque = deque(maxlen=5000)  # (battle_count, wr)
         self._baseline1_promotions: int = 0
         self._baseline2_promotions: int = 0
+        self._baseline_ref_wr1: float = 0.5  # baseline1's WR vs baseline2
+        self._baseline_ref_wr2: float = 0.5  # baseline2's WR vs baseline1
 
         # Best-model tracking and regression protection
         self.best_eval_win_rate: float = 0.0
@@ -258,7 +260,7 @@ class Trainer:
         self.greedy_eval_results.append((self.battle_count, wr))
         return wr
 
-    def _init_baselines(self):
+    async def _init_baselines(self):
         """Freeze copies of both agents as baselines for absolute skill measurement.
 
         Each baseline plays its respective team.  Current agents are evaluated
@@ -305,6 +307,33 @@ class Trainer:
                 self.agent2, 1, self.battle_count, 0.5,
             )
 
+        # Establish reference WRs: how well each baseline performs vs the other
+        await self._update_baseline_reference_wrs()
+
+    async def _update_baseline_reference_wrs(self):
+        """Run baseline1 vs baseline2 to establish reference win rates.
+
+        These reference WRs are the bar that current agents must beat (plus
+        a margin) to earn a promotion.
+        """
+        n = self.config.baseline_eval_battles
+
+        # baseline1 (team1) vs baseline2 (team2)
+        w1_before = self._baseline_player1.n_won_battles
+        t1_before = self._baseline_player1.n_finished_battles
+        await self._baseline_player1.battle_against(
+            self._baseline_player2, n_battles=n,
+        )
+        played1 = self._baseline_player1.n_finished_battles - t1_before
+        wins1 = self._baseline_player1.n_won_battles - w1_before
+        self._baseline_ref_wr1 = wins1 / played1 if played1 > 0 else 0.5
+        self._baseline_ref_wr2 = 1.0 - self._baseline_ref_wr1
+
+        logger.info(
+            f"Baseline reference WRs: team1={self._baseline_ref_wr1:.1%}, "
+            f"team2={self._baseline_ref_wr2:.1%}"
+        )
+
     async def _run_baseline_eval(self) -> Tuple[float, float]:
         """Evaluate both agents against the opposing team's baseline.
 
@@ -339,12 +368,17 @@ class Trainer:
         self.baseline_eval_results_team2.append((self.battle_count, wr2))
         return wr1, wr2
 
-    def _maybe_promote_baselines(self, wr1: float, wr2: float):
-        """Promote baselines when current agents beat the opposing baseline."""
-        threshold = self.config.baseline_promotion_threshold
+    async def _maybe_promote_baselines(self, wr1: float, wr2: float):
+        """Promote baselines when current agents outperform the baseline-vs-baseline reference.
+
+        Instead of requiring an absolute WR (e.g. 55%), promotion happens when
+        the current agent beats the opposing baseline by more than the baseline
+        itself does, plus a configurable margin.
+        """
+        margin = self.config.baseline_promotion_margin
         promoted = False
 
-        if wr1 > threshold:
+        if wr1 > self._baseline_ref_wr1 + margin:
             self._baseline_agent1.load_weights_only(self.agent1.get_state_dict())
             self._baseline1_promotions += 1
             promoted = True
@@ -353,10 +387,11 @@ class Trainer:
             )
             logger.info(
                 f"Baseline team1 promoted (WR vs BL2={wr1:.1%}, "
+                f"ref={self._baseline_ref_wr1:.1%}, margin={margin:.1%}, "
                 f"promotion #{self._baseline1_promotions})"
             )
 
-        if wr2 > threshold:
+        if wr2 > self._baseline_ref_wr2 + margin:
             self._baseline_agent2.load_weights_only(self.agent2.get_state_dict())
             self._baseline2_promotions += 1
             promoted = True
@@ -365,10 +400,14 @@ class Trainer:
             )
             logger.info(
                 f"Baseline team2 promoted (WR vs BL1={wr2:.1%}, "
+                f"ref={self._baseline_ref_wr2:.1%}, margin={margin:.1%}, "
                 f"promotion #{self._baseline2_promotions})"
             )
 
         if promoted:
+            # Re-evaluate baseline-vs-baseline reference since one or both
+            # baselines changed.
+            await self._update_baseline_reference_wrs()
             self.ckpt_manager.save_combined_best(
                 self.agent1, self.agent2,
                 self.league, self.wp_estimator,
@@ -434,6 +473,8 @@ class Trainer:
         self.baseline_eval_results_team2 = deque(maxlen=5000)
         self._baseline1_promotions = 0
         self._baseline2_promotions = 0
+        self._baseline_ref_wr1 = 0.5
+        self._baseline_ref_wr2 = 0.5
         self.best_eval_win_rate = 0.0
         self.regression_counter = 0
         self._entropy_bump_until = 0
@@ -457,7 +498,7 @@ class Trainer:
 
         # Freeze per-team baselines for absolute skill evaluation
         if self.config.baseline_eval_enabled:
-            self._init_baselines()
+            await self._init_baselines()
 
         logger.info(
             f"Starting training: {self.config.total_battles} battles, "
@@ -517,12 +558,14 @@ class Trainer:
                                    or self.config.greedy_eval_interval)
                     if bl_interval > 0 and self.battle_count % bl_interval == 0:
                         wr1, wr2 = await self._run_baseline_eval()
+                        margin = self.config.baseline_promotion_margin
                         logger.info(
                             f"  Baseline eval at battle {self.battle_count}: "
-                            f"Team1={wr1:.1%}, Team2={wr2:.1%} "
+                            f"Team1={wr1:.1%} (ref={self._baseline_ref_wr1:.1%}+{margin:.0%}), "
+                            f"Team2={wr2:.1%} (ref={self._baseline_ref_wr2:.1%}+{margin:.0%}) "
                             f"(promotions: {self._baseline1_promotions}/{self._baseline2_promotions})"
                         )
-                        self._maybe_promote_baselines(wr1, wr2)
+                        await self._maybe_promote_baselines(wr1, wr2)
 
             # Periodic logging + plateau detection
             if self.battle_count % 50 == 0:
