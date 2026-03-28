@@ -367,13 +367,8 @@ class League:
             selected = self._pfsp_select(current_agent_id, opponents)
             kind = "pfsp"
         else:
-            own_agents = [a for a in self.agents if a.team_id == current_team_id]
-            if own_agents:
-                selected = random.choice(own_agents)
-                kind = "self_play"
-            else:
-                selected = opponents[-1]
-                kind = "main"
+            selected = random.choice(opponents)
+            kind = "self_play"
 
         selected.selection_count += 1
         return selected, kind
