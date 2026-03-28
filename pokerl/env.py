@@ -257,50 +257,77 @@ class RLPlayer(Player):
         else:
             self.agent.losses += 1
 
+    async def _handle_battle_message(self, split_messages):
+        """Override to skip messages for stale/unknown battles.
+
+        Battles from previous sessions or failed batches may linger on
+        the Showdown server.  When messages arrive for battles not in
+        ``_battles`` (and it's not an init), auto-leave and discard to
+        prevent ``_get_battle`` from blocking POKE_LOOP forever.
+        """
+        room = split_messages[0][0]
+        tag = room[1:] if room.startswith(">") else room
+
+        # Check if this is an init message (new battle being created)
+        is_init = (
+            len(split_messages) > 1
+            and len(split_messages[1]) > 1
+            and split_messages[1][1] == "init"
+        )
+
+        if not is_init and tag not in self._battles:
+            # Stale battle — leave on server and ignore
+            if hasattr(self.ps_client, "websocket"):
+                try:
+                    await self.ps_client.send_message(f"/leave {tag}")
+                except Exception:
+                    pass
+            return
+
+        await super()._handle_battle_message(split_messages)
+
     def reset_battle_state(self):
         """Reset poke-env battle orchestration state for clean reuse.
 
-        Leaves any unfinished battles on the server, clears internal
-        tracking, and reinitializes async primitives (challenge queue,
-        battle count queue, semaphore) so the next battle_against call
-        starts fresh without stale entries from previous batches.
+        Force-finishes stale battles, drains async queues, and resets
+        the semaphore so the next ``battle_against`` starts cleanly.
+        Runs queue operations in POKE_LOOP for thread safety.
         """
         import asyncio as _asyncio
         from poke_env.concurrency import POKE_LOOP, create_in_poke_loop
 
-        # Leave unfinished battles on the server so it stops sending
-        # messages for them.  Must run in POKE_LOOP where the websocket
-        # lives.
-        stale_tags = [
-            tag for tag, b in self._battles.items() if not b.finished
-        ]
-        if stale_tags and hasattr(self.ps_client, "websocket"):
-            async def _leave_all():
-                for tag in stale_tags:
-                    try:
-                        await self.ps_client.send_message(f"/leave {tag}")
-                    except Exception:
-                        pass
-
-            try:
-                future = _asyncio.run_coroutine_threadsafe(
-                    _leave_all(), POKE_LOOP
-                )
-                future.result(timeout=5)
-            except Exception:
-                pass
-
-        # Keep only finished battles (for stats); discard stale ones
+        # Remove unfinished battles from tracking.  The override of
+        # _handle_battle_message will auto-leave and skip any future
+        # server messages for them, preventing queue/semaphore corruption.
         self._battles = {
             tag: b for tag, b in self._battles.items() if b.finished
         }
 
-        # Reinitialize async primitives in POKE_LOOP
+        # Drain queues in POKE_LOOP for thread safety
+        async def _drain():
+            # Drain battle count queue (items from unfinished battles)
+            while not self._battle_count_queue.empty():
+                try:
+                    self._battle_count_queue.get_nowait()
+                    self._battle_count_queue.task_done()
+                except Exception:
+                    break
+            # Drain challenge queue (duplicate entries from poke-env)
+            while not self._challenge_queue.empty():
+                try:
+                    self._challenge_queue.get_nowait()
+                except Exception:
+                    break
+
+        try:
+            future = _asyncio.run_coroutine_threadsafe(_drain(), POKE_LOOP)
+            future.result(timeout=5)
+        except Exception:
+            pass
+
+        # Reinitialize semaphore — safe because battle_against has
+        # returned and no coroutines are waiting on the old one.
         self._battle_semaphore = create_in_poke_loop(_asyncio.Semaphore, 0)
-        self._battle_count_queue = create_in_poke_loop(
-            _asyncio.Queue, self._max_concurrent_battles
-        )
-        self._challenge_queue = create_in_poke_loop(_asyncio.Queue)
 
         # Clear our own per-battle episode tracking
         self._episode_states = {}

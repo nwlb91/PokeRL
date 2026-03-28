@@ -249,12 +249,12 @@ class Trainer:
         self.agent1.set_eval()
         self.agent2.set_eval()
 
-        wins_before = player1.n_won_battles
-        total_before = player1.n_finished_battles
-
         n = self.config.greedy_eval_battles
         player1.reset_battle_state()
         player2.reset_battle_state()
+
+        wins_before = player1.n_won_battles
+        total_before = player1.n_finished_battles
         await player1.battle_against(player2, n_battles=n)
 
         wins_after = player1.n_won_battles
@@ -356,9 +356,9 @@ class Trainer:
 
         # Agent1 (team1) vs baseline2 (team2)
         p1 = self._get_or_create_eval_player1()
-        w1_before, t1_before = p1.n_won_battles, p1.n_finished_battles
         p1.reset_battle_state()
         self._baseline_player2.reset_battle_state()
+        w1_before, t1_before = p1.n_won_battles, p1.n_finished_battles
         await p1.battle_against(self._baseline_player2, n_battles=n)
         played1 = p1.n_finished_battles - t1_before
         wins1 = p1.n_won_battles - w1_before
@@ -366,9 +366,9 @@ class Trainer:
 
         # Agent2 (team2) vs baseline1 (team1)
         p2 = self._get_or_create_eval_player2()
-        w2_before, t2_before = p2.n_won_battles, p2.n_finished_battles
         p2.reset_battle_state()
         self._baseline_player1.reset_battle_state()
+        w2_before, t2_before = p2.n_won_battles, p2.n_finished_battles
         await p2.battle_against(self._baseline_player1, n_battles=n)
         played2 = p2.n_finished_battles - t2_before
         wins2 = p2.n_won_battles - w2_before
