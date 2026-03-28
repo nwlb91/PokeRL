@@ -878,7 +878,8 @@ class PokeRLApp(tk.Tk):
     def _on_stop_server(self):
         if self._showdown_proc:
             self._log("Stopping Showdown server...")
-            self._cleanup_server()
+            self.btn_stop_server.config(state="disabled")
+            threading.Thread(target=self._cleanup_server, daemon=True).start()
 
     def _cleanup_server(self):
         """Terminate the showdown server and all its child processes."""
@@ -892,6 +893,7 @@ class PokeRLApp(tk.Tk):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            proc.wait()
         else:
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
