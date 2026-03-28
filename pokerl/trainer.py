@@ -23,8 +23,6 @@ from poke_env.ps_client.server_configuration import (
     LocalhostServerConfiguration,
     ServerConfiguration,
 )
-from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
-
 from pokerl.agent import PPOAgent
 from pokerl.checkpoint import CheckpointManager
 from pokerl.config import Config
@@ -220,11 +218,27 @@ class Trainer:
             )
         elif self._league_opponent_team_id != team_id:
             # Update the teambuilder when switching sides
-            self._league_opponent_player._team = ConstantTeambuilder(team_str)
+            self._league_opponent_player.update_team(team_str)
 
         self._league_opponent_id = league_agent.agent_id
         self._league_opponent_team_id = team_id
         return self._league_opponent_player
+
+    @staticmethod
+    def _drain_challenge_queue(player: RLPlayer):
+        """Drain any stale entries from a player's challenge queue.
+
+        poke-env receives two server messages per challenge (updatechallenges
+        and pm /challenge), each adding an entry to _challenge_queue.  Only
+        one is consumed per accept, so leftovers accumulate and cause
+        desync on subsequent battle_against calls.
+        """
+        q = player._challenge_queue
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except Exception:
+                break
 
     def _get_effective_entropy_coef(self) -> float:
         """Compute the entropy coefficient with annealing and plateau bump."""
@@ -255,6 +269,8 @@ class Trainer:
         total_before = player1.n_finished_battles
 
         n = self.config.greedy_eval_battles
+        self._drain_challenge_queue(player1)
+        self._drain_challenge_queue(player2)
         await player1.battle_against(player2, n_battles=n)
 
         wins_after = player1.n_won_battles
@@ -357,6 +373,8 @@ class Trainer:
         # Agent1 (team1) vs baseline2 (team2)
         p1 = self._get_or_create_eval_player1()
         w1_before, t1_before = p1.n_won_battles, p1.n_finished_battles
+        self._drain_challenge_queue(p1)
+        self._drain_challenge_queue(self._baseline_player2)
         await p1.battle_against(self._baseline_player2, n_battles=n)
         played1 = p1.n_finished_battles - t1_before
         wins1 = p1.n_won_battles - w1_before
@@ -365,6 +383,8 @@ class Trainer:
         # Agent2 (team2) vs baseline1 (team1)
         p2 = self._get_or_create_eval_player2()
         w2_before, t2_before = p2.n_won_battles, p2.n_finished_battles
+        self._drain_challenge_queue(p2)
+        self._drain_challenge_queue(self._baseline_player1)
         await p2.battle_against(self._baseline_player1, n_battles=n)
         played2 = p2.n_finished_battles - t2_before
         wins2 = p2.n_won_battles - w2_before
@@ -726,6 +746,12 @@ class Trainer:
         if not use_league:
             opponent_player = live_opponent_fn()
             opponent_agent_id = live_agent.agent_id
+
+        # Drain stale challenge queue entries from both players.
+        # poke-env adds two entries per challenge (updatechallenges + pm),
+        # leaving leftovers that cause "not challenging you" on reuse.
+        self._drain_challenge_queue(training_player)
+        self._drain_challenge_queue(opponent_player)
 
         await training_player.battle_against(opponent_player, n_battles=n_battles)
 
