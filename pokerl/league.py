@@ -43,6 +43,9 @@ from pokerl.config import Config
 
 logger = logging.getLogger(__name__)
 
+# Allow numpy scalars in torch.load(weights_only=True).
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+
 
 class LeagueAgent:
     """A frozen agent snapshot in the league.

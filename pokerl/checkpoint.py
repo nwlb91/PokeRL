@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 
 from pokerl.agent import PPOAgent
@@ -19,6 +20,11 @@ from pokerl.league import League
 from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
+
+# Allow numpy scalars in torch.load(weights_only=True).  Optimizer and
+# LR-scheduler state dicts may contain numpy scalars (e.g. from Adam's
+# step count), which aren't in PyTorch's default allowlist.
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 
 
 class CheckpointManager:
