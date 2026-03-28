@@ -83,7 +83,7 @@ class Config:
     pfsp_temperature: float = 0.1  # temperature for PFSP opponent sampling
     main_agent_fraction: float = 0.5  # fraction of games vs latest opponent
     pfsp_fraction: float = 0.35  # fraction of games via PFSP
-    self_play_fraction: float = 0.15  # fraction of self-play games
+    self_play_fraction: float = 0.15  # fraction of games vs random historical opponent
 
     # --- League admission & pruning ---
     league_min_size: int = 4  # min agents before admission gate activates

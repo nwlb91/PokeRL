@@ -704,7 +704,7 @@ class Trainer:
             )
             if result is not None:
                 league_agent, kind = result
-                if kind in ("pfsp", "self_play"):
+                if kind == "pfsp":
                     # Use frozen league opponent
                     opponent_team_id = league_agent.team_id
                     opponent_player = self._get_league_player(

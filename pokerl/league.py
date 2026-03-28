@@ -26,7 +26,7 @@ Implements a simplified version of AlphaStar's league training:
 Opponent selection distribution per battle:
   - main_agent_fraction: play against the other team's latest agent
   - pfsp_fraction: play against a PFSP-selected historical opponent
-  - self_play_fraction: play against own team's historical checkpoint
+  - self_play_fraction: play against a random historical opponent from the opposing team
 """
 
 import logging
@@ -350,7 +350,7 @@ class League:
 
         Returns:
             A (LeagueAgent, selection_type) tuple, where selection_type is one
-            of "main", "pfsp", or "self_play".  Returns None if league is empty.
+            of "main" or "pfsp".  Returns None if league is empty.
         """
         opponent_team_id = 1 - current_team_id
         opponents = [a for a in self.agents if a.team_id == opponent_team_id]
@@ -367,13 +367,8 @@ class League:
             selected = self._pfsp_select(current_agent_id, opponents)
             kind = "pfsp"
         else:
-            own_agents = [a for a in self.agents if a.team_id == current_team_id]
-            if own_agents:
-                selected = random.choice(own_agents)
-                kind = "self_play"
-            else:
-                selected = opponents[-1]
-                kind = "main"
+            selected = random.choice(opponents)
+            kind = "pfsp"
 
         selected.selection_count += 1
         return selected, kind
