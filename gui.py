@@ -838,6 +838,9 @@ class PokeRLApp(tk.Tk):
             )
             self._log("Created Showdown config with subprocesses disabled.")
 
+        # Kill any leftover process holding the port (e.g. orphan from a previous session).
+        self._free_port(port)
+
         # Start with --skip-build so the server process doesn't re-invoke esbuild.
         cmd = [node, ps_main, "start", "--no-security", "--skip-build", f"--port={port}"]
         popen_kwargs = dict(
@@ -880,6 +883,47 @@ class PokeRLApp(tk.Tk):
             self._log("Stopping Showdown server...")
             self.btn_stop_server.config(state="disabled")
             threading.Thread(target=self._cleanup_server, daemon=True).start()
+
+    def _free_port(self, port: int):
+        """Kill any process currently listening on *port*."""
+        if os.name == "nt":
+            # netstat -ano produces lines like:
+            #   TCP    0.0.0.0:8000    0.0.0.0:0    LISTENING    12345
+            try:
+                out = subprocess.check_output(
+                    ["netstat", "-ano", "-p", "TCP"],
+                    text=True, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                return
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[3] == "LISTENING":
+                    addr = parts[1]
+                    if addr.endswith(f":{port}"):
+                        pid = int(parts[4])
+                        self._log(f"Killing leftover process on port {port} (PID {pid})...")
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+        else:
+            # Unix: lsof -ti :port returns PIDs
+            try:
+                out = subprocess.check_output(
+                    ["lsof", "-ti", f":{port}"],
+                    text=True, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                return
+            for pid_str in out.split():
+                pid = int(pid_str)
+                self._log(f"Killing leftover process on port {port} (PID {pid})...")
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
 
     def _cleanup_server(self):
         """Terminate the showdown server and all its child processes."""
