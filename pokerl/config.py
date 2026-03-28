@@ -102,6 +102,7 @@ class Config:
     total_battles: int = 100000
     infinite_training: bool = False       # ignore total_battles, train forever
     num_parallel_battles: int = 4
+    battle_timeout: float = 300.0  # seconds; timeout per battle_against call
     device: str = "cpu"
 
     # --- Plateau response ---
@@ -138,6 +139,7 @@ class Config:
         _check_positive("hidden_size", self.hidden_size)
         _check_positive("num_layers", self.num_layers)
         _check_positive("total_battles", self.total_battles)
+        _check_positive("battle_timeout", self.battle_timeout)
         _check_range("main_agent_fraction", self.main_agent_fraction, 0.0, 1.0)
         _check_range("pfsp_fraction", self.pfsp_fraction, 0.0, 1.0)
         _check_range("self_play_fraction", self.self_play_fraction, 0.0, 1.0)

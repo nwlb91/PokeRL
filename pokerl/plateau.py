@@ -189,7 +189,7 @@ class PlateauDetector:
         p_value = _two_tailed_t_pvalue(t_stat, df)
 
         std_y = math.sqrt(ss_yy / n) if n > 0 else 0.0
-        cv = std_y / y_mean if y_mean > 0 else 0.0
+        cv = std_y / (abs(y_mean) + 1e-8)
 
         return slope, p_value, std_y, cv
 

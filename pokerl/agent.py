@@ -76,11 +76,11 @@ class RolloutBuffer:
     def to_tensors(self, device: torch.device):
         """Pre-stack all data into tensors once (avoid repeated conversions)."""
         n = len(self.steps)
-        obs = np.array([self.steps[i].obs for i in range(n)])
-        actions = np.array([self.steps[i].action for i in range(n)], dtype=np.int64)
-        masks = np.array([self.steps[i].action_mask for i in range(n)])
-        log_probs = np.array([self.steps[i].log_prob for i in range(n)], dtype=np.float32)
-        old_values = np.array([self.steps[i].value for i in range(n)], dtype=np.float32)
+        obs = np.stack([s.obs for s in self.steps])
+        actions = np.array([s.action for s in self.steps], dtype=np.int64)
+        masks = np.stack([s.action_mask for s in self.steps])
+        log_probs = np.array([s.log_prob for s in self.steps], dtype=np.float32)
+        old_values = np.array([s.value for s in self.steps], dtype=np.float32)
         return (
             torch.from_numpy(obs).to(device),
             torch.from_numpy(actions).to(device),

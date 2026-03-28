@@ -119,6 +119,10 @@ def get_team_preview_mask(battle: Battle) -> np.ndarray:
         if i < 6 and not mon.fainted:
             mask[i] = 1.0
     if mask.sum() == 0:
+        logger.warning(
+            "Team preview mask is all zeros — no non-fainted Pokemon detected. "
+            "Falling back to lead 0."
+        )
         mask[0] = 1.0
     return mask
 

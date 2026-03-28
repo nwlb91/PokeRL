@@ -94,7 +94,13 @@ class PayoffMatrix:
     def record_result(self, agent_a: str, agent_b: str, a_won: bool):
         """Record a game result, updating EMAs for both perspectives."""
         self._update_ema(agent_a, agent_b, float(a_won))
-        self._update_ema(agent_b, agent_a, float(not a_won))
+        # Enforce symmetry: reverse direction is always the complement
+        # so that ema(a,b) + ema(b,a) == 1.0 after every update.
+        fwd_key = (agent_a, agent_b)
+        rev_key = (agent_b, agent_a)
+        fwd_ema, _ = self._records[fwd_key]
+        _, rev_total = self._records.get(rev_key, (0.5, 0))
+        self._records[rev_key] = (1.0 - fwd_ema, rev_total + 1)
 
     def _update_ema(self, agent_a: str, agent_b: str, outcome: float):
         key = (agent_a, agent_b)

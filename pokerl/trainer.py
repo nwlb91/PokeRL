@@ -113,7 +113,8 @@ class Trainer:
         self.best_eval_win_rate: float = 0.0
         self.regression_counter: int = 0
 
-        # Plateau response: entropy bump
+        # Plateau response: entropy bump (linear decay from start to until)
+        self._entropy_bump_start: int = 0
         self._entropy_bump_until: int = 0
 
         # Plateau detector — window and patience scale with checkpoint interval
@@ -227,16 +228,20 @@ class Trainer:
             coef = cfg.entropy_coef_start + progress * (cfg.entropy_coef_end - cfg.entropy_coef_start)
         else:
             coef = cfg.entropy_coef
-        # Plateau bump
-        if self.battle_count < self._entropy_bump_until:
-            coef += cfg.plateau_entropy_bump
+        # Plateau bump — linear decay to avoid discontinuity when bump expires
+        if (self._entropy_bump_start < self._entropy_bump_until
+                and self.battle_count < self._entropy_bump_until):
+            bump_duration = self._entropy_bump_until - self._entropy_bump_start
+            bump_remaining = self._entropy_bump_until - self.battle_count
+            coef += cfg.plateau_entropy_bump * (bump_remaining / bump_duration)
         return coef
 
-    async def _run_greedy_eval(self) -> float:
+    async def _run_greedy_eval(self) -> Optional[float]:
         """Run evaluation battles between the two main agents.
 
         Agents sample from their policy distributions (stochastic) to
-        match real play conditions.  Returns eval win rate for agent1.
+        match real play conditions.  Returns eval win rate for agent1,
+        or None if no battles completed.
         """
         player1 = self._get_or_create_eval_player1()
         player2 = self._get_or_create_eval_player2()
@@ -248,7 +253,15 @@ class Trainer:
         total_before = player1.n_finished_battles
 
         n = self.config.greedy_eval_battles
-        await player1.battle_against(player2, n_battles=n)
+        try:
+            await asyncio.wait_for(
+                player1.battle_against(player2, n_battles=n),
+                timeout=self.config.battle_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Greedy eval timed out after {self.config.battle_timeout}s"
+            )
 
         wins_after = player1.n_won_battles
         total_after = player1.n_finished_battles
@@ -258,7 +271,10 @@ class Trainer:
         self.agent1.set_train()
         self.agent2.set_train()
 
-        wr = wins / played if played > 0 else 0.5
+        if played == 0:
+            logger.warning("Greedy eval: no battles completed")
+            return None
+        wr = wins / played
         self.greedy_eval_results.append((self.battle_count, wr))
         return wr
 
@@ -323,25 +339,36 @@ class Trainer:
         # baseline1 (team1) vs baseline2 (team2)
         w1_before = self._baseline_player1.n_won_battles
         t1_before = self._baseline_player1.n_finished_battles
-        await self._baseline_player1.battle_against(
-            self._baseline_player2, n_battles=n,
-        )
+        try:
+            await asyncio.wait_for(
+                self._baseline_player1.battle_against(
+                    self._baseline_player2, n_battles=n,
+                ),
+                timeout=self.config.battle_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Baseline reference eval timed out after {self.config.battle_timeout}s"
+            )
         played1 = self._baseline_player1.n_finished_battles - t1_before
         wins1 = self._baseline_player1.n_won_battles - w1_before
-        self._baseline_ref_wr1 = wins1 / played1 if played1 > 0 else 0.5
-        self._baseline_ref_wr2 = 1.0 - self._baseline_ref_wr1
+        if played1 > 0:
+            self._baseline_ref_wr1 = wins1 / played1
+            self._baseline_ref_wr2 = 1.0 - self._baseline_ref_wr1
+        else:
+            logger.warning("Baseline reference: no battles completed, keeping defaults")
 
         logger.info(
             f"Baseline reference WRs: team1={self._baseline_ref_wr1:.1%}, "
             f"team2={self._baseline_ref_wr2:.1%}"
         )
 
-    async def _run_baseline_eval(self) -> Tuple[float, float]:
+    async def _run_baseline_eval(self) -> Tuple[Optional[float], Optional[float]]:
         """Evaluate both agents against the opposing team's baseline.
 
         Returns (wr1, wr2):
-          - wr1: current agent1 (team1) vs baseline2 (team2)
-          - wr2: current agent2 (team2) vs baseline1 (team1)
+          - wr1: current agent1 (team1) vs baseline2 (team2), or None
+          - wr2: current agent2 (team2) vs baseline1 (team1), or None
         """
         n = self.config.baseline_eval_battles
         self.agent1.set_eval()
@@ -350,24 +377,38 @@ class Trainer:
         # Agent1 (team1) vs baseline2 (team2)
         p1 = self._get_or_create_eval_player1()
         w1_before, t1_before = p1.n_won_battles, p1.n_finished_battles
-        await p1.battle_against(self._baseline_player2, n_battles=n)
+        try:
+            await asyncio.wait_for(
+                p1.battle_against(self._baseline_player2, n_battles=n),
+                timeout=self.config.battle_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Baseline eval (team1) timed out after {self.config.battle_timeout}s")
         played1 = p1.n_finished_battles - t1_before
         wins1 = p1.n_won_battles - w1_before
-        wr1 = wins1 / played1 if played1 > 0 else 0.5
+        wr1 = wins1 / played1 if played1 > 0 else None
 
         # Agent2 (team2) vs baseline1 (team1)
         p2 = self._get_or_create_eval_player2()
         w2_before, t2_before = p2.n_won_battles, p2.n_finished_battles
-        await p2.battle_against(self._baseline_player1, n_battles=n)
+        try:
+            await asyncio.wait_for(
+                p2.battle_against(self._baseline_player1, n_battles=n),
+                timeout=self.config.battle_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Baseline eval (team2) timed out after {self.config.battle_timeout}s")
         played2 = p2.n_finished_battles - t2_before
         wins2 = p2.n_won_battles - w2_before
-        wr2 = wins2 / played2 if played2 > 0 else 0.5
+        wr2 = wins2 / played2 if played2 > 0 else None
 
         self.agent1.set_train()
         self.agent2.set_train()
 
-        self.baseline_eval_results_team1.append((self.battle_count, wr1))
-        self.baseline_eval_results_team2.append((self.battle_count, wr2))
+        if wr1 is not None:
+            self.baseline_eval_results_team1.append((self.battle_count, wr1))
+        if wr2 is not None:
+            self.baseline_eval_results_team2.append((self.battle_count, wr2))
         return wr1, wr2
 
     async def _maybe_promote_baselines(self, wr1: float, wr2: float):
@@ -485,6 +526,7 @@ class Trainer:
         self._baseline_ref_wr2 = 0.5
         self.best_eval_win_rate = 0.0
         self.regression_counter = 0
+        self._entropy_bump_start = 0
         self._entropy_bump_until = 0
         self._latest_explained_variance = 0.0
         self._latest_metrics = {}
@@ -555,13 +597,16 @@ class Trainer:
             if (self.config.greedy_eval_interval > 0 and
                     self.battle_count - self._last_greedy_eval >= self.config.greedy_eval_interval):
                 greedy_wr = await self._run_greedy_eval()
-                logger.info(
-                    f"  Greedy eval at battle {self.battle_count}: "
-                    f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
-                )
+                if greedy_wr is None:
+                    logger.warning("Skipping eval processing — no battles completed")
+                else:
+                    logger.info(
+                        f"  Greedy eval at battle {self.battle_count}: "
+                        f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
+                    )
 
                 # Best-model tracking: save when we hit a new high
-                if self.config.best_model_tracking:
+                if greedy_wr is not None and self.config.best_model_tracking:
                     if greedy_wr > self.best_eval_win_rate:
                         self.best_eval_win_rate = greedy_wr
                         self.regression_counter = 0
@@ -606,14 +651,17 @@ class Trainer:
                             self.battle_count - self._last_baseline_eval >= bl_interval):
                         wr1, wr2 = await self._run_baseline_eval()
                         self._last_baseline_eval = self.battle_count
-                        margin = self.config.baseline_promotion_margin
-                        logger.info(
-                            f"  Baseline eval at battle {self.battle_count}: "
-                            f"Team1={wr1:.1%} (ref={self._baseline_ref_wr1:.1%}+{margin:.0%}), "
-                            f"Team2={wr2:.1%} (ref={self._baseline_ref_wr2:.1%}+{margin:.0%}) "
-                            f"(promotions: {self._baseline1_promotions}/{self._baseline2_promotions})"
-                        )
-                        await self._maybe_promote_baselines(wr1, wr2)
+                        if wr1 is not None and wr2 is not None:
+                            margin = self.config.baseline_promotion_margin
+                            logger.info(
+                                f"  Baseline eval at battle {self.battle_count}: "
+                                f"Team1={wr1:.1%} (ref={self._baseline_ref_wr1:.1%}+{margin:.0%}), "
+                                f"Team2={wr2:.1%} (ref={self._baseline_ref_wr2:.1%}+{margin:.0%}) "
+                                f"(promotions: {self._baseline1_promotions}/{self._baseline2_promotions})"
+                            )
+                            await self._maybe_promote_baselines(wr1, wr2)
+                        else:
+                            logger.warning("Baseline eval: some battles did not complete, skipping")
 
             # Periodic logging + plateau detection
             if self.battle_count - self._last_stats_log >= 50:
@@ -640,6 +688,7 @@ class Trainer:
                     )
                     # Plateau response
                     if self.config.plateau_action == "entropy_bump":
+                        self._entropy_bump_start = self.battle_count
                         self._entropy_bump_until = (
                             self.battle_count + self.config.plateau_bump_duration
                         )
@@ -720,7 +769,16 @@ class Trainer:
             opponent_player = live_opponent_fn()
             opponent_agent_id = live_agent.agent_id
 
-        await training_player.battle_against(opponent_player, n_battles=n_battles)
+        try:
+            await asyncio.wait_for(
+                training_player.battle_against(opponent_player, n_battles=n_battles),
+                timeout=self.config.battle_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Battle timed out after {self.config.battle_timeout}s "
+                f"at battle {self.battle_count}. Processing any completed episodes."
+            )
 
         # Process each completed battle individually via per-battle state
         ko_w = self.config.ko_reward_weight
