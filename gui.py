@@ -840,14 +840,15 @@ class PokeRLApp(tk.Tk):
 
         # Start with --skip-build so the server process doesn't re-invoke esbuild.
         cmd = [node, ps_main, "start", "--no-security", "--skip-build", f"--port={port}"]
-        self._showdown_proc = subprocess.Popen(
-            cmd,
+        popen_kwargs = dict(
             cwd=sd_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            start_new_session=True,
         )
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        self._showdown_proc = subprocess.Popen(cmd, **popen_kwargs)
         self._log(f"Starting Showdown server (PID {self._showdown_proc.pid}) on port {port}...")
         self.after(0, self._server_started)
 
@@ -884,18 +885,26 @@ class PokeRLApp(tk.Tk):
         proc = self._showdown_proc
         if proc is None or proc.poll() is not None:
             return
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except OSError:
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            # Windows: taskkill /T kills the entire process tree
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                os.killpg(proc.pid, signal.SIGTERM)
             except OSError:
-                proc.kill()
-            proc.wait()
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+                proc.wait()
 
     # ----- Training control -------------------------------------------------
 
