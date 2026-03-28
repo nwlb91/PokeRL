@@ -43,8 +43,6 @@ from pokerl.config import Config
 
 logger = logging.getLogger(__name__)
 
-# Allow numpy scalars in torch.load(weights_only=True).
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 
 
 class LeagueAgent:
@@ -71,7 +69,7 @@ class LeagueAgent:
         """Lazy-load weights from disk if not already cached."""
         if self._state_dict is None:
             self._state_dict = torch.load(
-                self.checkpoint_path, map_location="cpu", weights_only=True
+                self.checkpoint_path, map_location="cpu", weights_only=False
             )
         return self._state_dict
 

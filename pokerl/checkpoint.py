@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 
 from pokerl.agent import PPOAgent
@@ -21,10 +20,6 @@ from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
 
-# Allow numpy scalars in torch.load(weights_only=True).  Optimizer and
-# LR-scheduler state dicts may contain numpy scalars (e.g. from Adam's
-# step count), which aren't in PyTorch's default allowlist.
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 
 
 class CheckpointManager:
@@ -121,7 +116,7 @@ class CheckpointManager:
         wp_estimator: WinProbabilityEstimator,
     ) -> int:
         logger.info(f"Loading checkpoint from {path}")
-        state = torch.load(path, map_location="cpu", weights_only=True)
+        state = torch.load(path, map_location="cpu", weights_only=False)
 
         agent1.load_state_dict(state["agent1"])
         agent2.load_state_dict(state["agent2"])
@@ -197,12 +192,12 @@ class CheckpointManager:
         t2_path = self.checkpoint_dir / "best_team2.pt"
 
         if t1_path.exists():
-            a1_state = torch.load(t1_path, map_location="cpu", weights_only=True)["agent"]
+            a1_state = torch.load(t1_path, map_location="cpu", weights_only=False)["agent"]
         else:
             a1_state = agent1.get_state_dict()
 
         if t2_path.exists():
-            a2_state = torch.load(t2_path, map_location="cpu", weights_only=True)["agent"]
+            a2_state = torch.load(t2_path, map_location="cpu", weights_only=False)["agent"]
         else:
             a2_state = agent2.get_state_dict()
 
