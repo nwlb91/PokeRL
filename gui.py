@@ -141,6 +141,7 @@ class PokeRLApp(tk.Tk):
         self.challenge_opponent_var = tk.StringVar(value="")
         self.challenge_format_var = tk.StringVar(value="gen9nationaldexmonotype")
         self.challenge_n_var = tk.IntVar(value=1)
+        self.challenge_team_select_var = tk.StringVar(value="agent1")
         self._challenge_stop = threading.Event()
 
         self._build_ui()
@@ -378,6 +379,21 @@ class PokeRLApp(tk.Tk):
 
         self._file_row(model_frame, "Checkpoint:", self.challenge_checkpoint_var, 0)
         self._file_row(model_frame, "Team file:", self.challenge_team_var, 1)
+
+        ttk.Label(model_frame, text="Agent team:").grid(row=2, column=0, sticky="e", **PADDING)
+        team_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.challenge_team_select_var,
+            values=["agent1", "agent2"],
+            state="readonly",
+            width=10,
+        )
+        team_combo.grid(row=2, column=1, sticky="w", **PADDING)
+        ttk.Label(
+            model_frame,
+            text="(only used for full checkpoints with both agents)",
+            foreground="gray",
+        ).grid(row=2, column=2, sticky="w", **PADDING)
 
         # --- Server ---
         server_frame = ttk.LabelFrame(parent, text="Server")
@@ -1229,15 +1245,23 @@ class PokeRLApp(tk.Tk):
                     battle_format=battle_format,
                     device="cpu",
                 )
-                state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+                state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
                 agent = PPOAgent(config, agent_id="challenger")
-                # Try agent1 key first, fall back to agent2
-                if "agent1" in state:
-                    agent.load_state_dict(state["agent1"])
-                elif "agent2" in state:
-                    agent.load_state_dict(state["agent2"])
+                # Load agent weights (inference-only, no optimizer state needed)
+                if "agent" in state:
+                    # Per-team checkpoint (best_team1.pt / best_team2.pt)
+                    agent.load_weights_only(state["agent"])
+                elif "agent1" in state or "agent2" in state:
+                    # Full checkpoint — use team selector
+                    team_key = self.challenge_team_select_var.get()
+                    if team_key not in state:
+                        # Fall back to whichever key exists
+                        team_key = "agent1" if "agent1" in state else "agent2"
+                    agent.load_weights_only(state[team_key])
                 else:
-                    raise ValueError("Checkpoint does not contain agent1 or agent2 keys.")
+                    raise ValueError(
+                        "Checkpoint does not contain agent, agent1, or agent2 keys."
+                    )
                 agent.set_eval()
 
                 acct = AccountConfiguration(username, password or None)
