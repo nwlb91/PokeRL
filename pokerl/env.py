@@ -257,6 +257,55 @@ class RLPlayer(Player):
         else:
             self.agent.losses += 1
 
+    def reset_battle_state(self):
+        """Reset poke-env battle orchestration state for clean reuse.
+
+        Leaves any unfinished battles on the server, clears internal
+        tracking, and reinitializes async primitives (challenge queue,
+        battle count queue, semaphore) so the next battle_against call
+        starts fresh without stale entries from previous batches.
+        """
+        import asyncio as _asyncio
+        from poke_env.concurrency import POKE_LOOP, create_in_poke_loop
+
+        # Leave unfinished battles on the server so it stops sending
+        # messages for them.  Must run in POKE_LOOP where the websocket
+        # lives.
+        stale_tags = [
+            tag for tag, b in self._battles.items() if not b.finished
+        ]
+        if stale_tags and hasattr(self.ps_client, "websocket"):
+            async def _leave_all():
+                for tag in stale_tags:
+                    try:
+                        await self.ps_client.send_message(f"/leave {tag}")
+                    except Exception:
+                        pass
+
+            try:
+                future = _asyncio.run_coroutine_threadsafe(
+                    _leave_all(), POKE_LOOP
+                )
+                future.result(timeout=5)
+            except Exception:
+                pass
+
+        # Keep only finished battles (for stats); discard stale ones
+        self._battles = {
+            tag: b for tag, b in self._battles.items() if b.finished
+        }
+
+        # Reinitialize async primitives in POKE_LOOP
+        self._battle_semaphore = create_in_poke_loop(_asyncio.Semaphore, 0)
+        self._battle_count_queue = create_in_poke_loop(
+            _asyncio.Queue, self._max_concurrent_battles
+        )
+        self._challenge_queue = create_in_poke_loop(_asyncio.Queue)
+
+        # Clear our own per-battle episode tracking
+        self._episode_states = {}
+        self._completed_episodes = []
+
     def pop_completed_episodes(self) -> List[CompletedEpisode]:
         """Return and clear all completed episodes.
 
