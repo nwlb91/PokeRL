@@ -2,9 +2,11 @@
 """PokeRL GUI — Manage training, evaluation, and Showdown server."""
 
 import asyncio
+import atexit
 import logging
 import os
 import queue
+import signal
 import shutil
 import subprocess
 import threading
@@ -96,6 +98,7 @@ class PokeRLApp(tk.Tk):
 
         # --- State ---
         self._showdown_proc: Optional[subprocess.Popen] = None
+        atexit.register(self._cleanup_server)
         self._trainer: Optional[Trainer] = None
         self._training_future = None
         self._training_stop = threading.Event()
@@ -843,6 +846,7 @@ class PokeRLApp(tk.Tk):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         self._log(f"Starting Showdown server (PID {self._showdown_proc.pid}) on port {port}...")
         self.after(0, self._server_started)
@@ -873,17 +877,25 @@ class PokeRLApp(tk.Tk):
     def _on_stop_server(self):
         if self._showdown_proc:
             self._log("Stopping Showdown server...")
-            self._showdown_proc.terminate()
-            threading.Thread(target=self._wait_kill_server, daemon=True).start()
+            self._cleanup_server()
 
-    def _wait_kill_server(self):
+    def _cleanup_server(self):
+        """Terminate the showdown server and all its child processes."""
         proc = self._showdown_proc
-        if proc:
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
                 proc.kill()
-                proc.wait()
+            proc.wait()
 
     # ----- Training control -------------------------------------------------
 
@@ -1240,12 +1252,7 @@ class PokeRLApp(tk.Tk):
     # ----- Cleanup ----------------------------------------------------------
 
     def destroy(self):
-        if self._showdown_proc:
-            self._showdown_proc.terminate()
-            try:
-                self._showdown_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._showdown_proc.kill()
+        self._cleanup_server()
         if _loop and _loop.is_running():
             _loop.call_soon_threadsafe(_loop.stop)
         super().destroy()
