@@ -23,6 +23,7 @@ from poke_env.ps_client.server_configuration import (
     LocalhostServerConfiguration,
     ServerConfiguration,
 )
+from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
 from pokerl.agent import PPOAgent
 from pokerl.checkpoint import CheckpointManager
@@ -96,6 +97,7 @@ class Trainer:
         self._league_opponent_agent: Optional[PPOAgent] = None
         self._league_opponent_player: Optional[RLPlayer] = None
         self._league_opponent_id: Optional[str] = None
+        self._league_opponent_team_id: Optional[int] = None
 
         # Per-team baselines for absolute skill measurement
         self._baseline_agent1: Optional[PPOAgent] = None  # best known team1 agent
@@ -186,12 +188,13 @@ class Trainer:
         """Get or create a frozen player for a league opponent.
 
         Reuses the player if possible, only reloading weights when the
-        league agent changes.
+        league agent changes.  Updates the team when team_id changes.
         """
         from pokerl.league import LeagueAgent
 
         if (self._league_opponent_player is not None
-                and self._league_opponent_id == league_agent.agent_id):
+                and self._league_opponent_id == league_agent.agent_id
+                and self._league_opponent_team_id == team_id):
             return self._league_opponent_player
 
         # Create or reuse the agent shell
@@ -215,8 +218,12 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
+        elif self._league_opponent_team_id != team_id:
+            # Update the teambuilder when switching sides
+            self._league_opponent_player._team = ConstantTeambuilder(team_str)
 
         self._league_opponent_id = league_agent.agent_id
+        self._league_opponent_team_id = team_id
         return self._league_opponent_player
 
     def _get_effective_entropy_coef(self) -> float:
