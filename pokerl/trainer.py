@@ -96,6 +96,7 @@ class Trainer:
         self._league_opponent_agent: Optional[PPOAgent] = None
         self._league_opponent_player: Optional[RLPlayer] = None
         self._league_opponent_id: Optional[str] = None
+        self._league_opponent_team_id: Optional[int] = None
 
         # Per-team baselines for absolute skill measurement
         self._baseline_agent1: Optional[PPOAgent] = None  # best known team1 agent
@@ -192,7 +193,8 @@ class Trainer:
         from pokerl.league import LeagueAgent
 
         if (self._league_opponent_player is not None
-                and self._league_opponent_id == league_agent.agent_id):
+                and self._league_opponent_id == league_agent.agent_id
+                and self._league_opponent_team_id == team_id):
             return self._league_opponent_player
 
         # Create or reuse the agent shell
@@ -205,19 +207,20 @@ class Trainer:
         # Pick the right team string
         team_str = self.team1_str if team_id == 0 else self.team2_str
 
-        # Create player if needed, or reuse existing (weights already swapped)
-        if self._league_opponent_player is None:
-            self._league_opponent_player = create_player(
-                agent=self._league_opponent_agent,
-                config=self.config,
-                team_str=team_str,
-                collect_data=False,
-                deterministic=False,
-                max_concurrent=self._n_concurrent,
-                server_configuration=self.server_config,
-            )
+        # Always recreate the player when agent or team changes to ensure
+        # the correct team is used (ConstantTeambuilder is set at creation)
+        self._league_opponent_player = create_player(
+            agent=self._league_opponent_agent,
+            config=self.config,
+            team_str=team_str,
+            collect_data=False,
+            deterministic=False,
+            max_concurrent=self._n_concurrent,
+            server_configuration=self.server_config,
+        )
 
         self._league_opponent_id = league_agent.agent_id
+        self._league_opponent_team_id = team_id
         return self._league_opponent_player
 
     def _get_effective_entropy_coef(self) -> float:
@@ -753,7 +756,7 @@ class Trainer:
             )
             if result is not None:
                 league_agent, kind = result
-                if kind in ("pfsp", "self_play"):
+                if kind == "pfsp":
                     # Use frozen league opponent
                     opponent_team_id = league_agent.team_id
                     opponent_player = self._get_league_player(
@@ -779,6 +782,11 @@ class Trainer:
                 f"Battle timed out after {self.config.battle_timeout}s "
                 f"at battle {self.battle_count}. Processing any completed episodes."
             )
+            # Reset league player to avoid stale challenge state
+            if use_league:
+                self._league_opponent_player = None
+                self._league_opponent_id = None
+                self._league_opponent_team_id = None
 
         # Process each completed battle individually via per-battle state
         ko_w = self.config.ko_reward_weight

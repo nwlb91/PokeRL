@@ -106,6 +106,24 @@ class RLPlayer(Player):
         # Completed episodes ready for the trainer to consume
         self._completed_episodes: List[CompletedEpisode] = []
 
+        # Track stale-challenge recovery
+        self._challenge_cancel_delay = 0.5  # seconds before retrying
+
+    async def _handle_message(self, message: str):
+        """Override to recover from 'already challenging' popups.
+
+        When the Showdown server reports a stale pending challenge, cancel
+        it so the next challenge attempt can succeed instead of hanging.
+        """
+        if "|popup|" in message and "already challenging" in message.lower():
+            logger.warning(
+                "Stale challenge detected, sending /cancelchallenge"
+            )
+            await self.ps_client.send_message("/cancelchallenge")
+            await asyncio.sleep(self._challenge_cancel_delay)
+            return
+        await super()._handle_message(message)
+
     def _get_episode_state(self, battle: Battle) -> _BattleEpisodeState:
         """Get or create the episode state for a specific battle."""
         tag = battle.battle_tag
