@@ -325,3 +325,50 @@ class WinProbabilityNet(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Returns win probability in [0, 1]."""
         return self.net(obs).squeeze(-1)
+
+
+class RNDTargetNet(nn.Module):
+    """Fixed random network for RND (never trained).
+
+    Maps observations to a low-dimensional embedding.  The random projection
+    is frozen at initialization — the prediction error of a learned predictor
+    against this target serves as a novelty signal.
+    """
+
+    def __init__(self, obs_size: int = BATTLE_OBS_SIZE,
+                 hidden_size: int = 256, embedding_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, embedding_dim),
+        )
+        # Freeze all parameters
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs)
+
+
+class RNDPredictorNet(nn.Module):
+    """Trainable predictor network for RND.
+
+    Has one extra hidden layer compared to the target so it has enough
+    capacity to match the target's output for frequently-seen states while
+    still producing high error on novel states.
+    """
+
+    def __init__(self, obs_size: int = BATTLE_OBS_SIZE,
+                 hidden_size: int = 256, embedding_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, embedding_dim),
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs)

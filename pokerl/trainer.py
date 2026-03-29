@@ -31,6 +31,7 @@ from pokerl.env import CompletedEpisode, RLPlayer, create_player, load_team
 from pokerl.league import League
 from pokerl.plateau import PlateauDetector, PlateauInfo
 from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
+from pokerl.rnd import RNDExploration
 from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,20 @@ class Trainer:
 
         # Win probability estimator (shared between both agents)
         self.wp_estimator = WinProbabilityEstimator(config)
+
+        # RND exploration (shared between both agents)
+        self.rnd: Optional[RNDExploration] = None
+        if config.rnd_enabled:
+            self.rnd = RNDExploration(config)
+            logger.info(
+                "RND exploration enabled: coef=%.3f, adaptive_temp=%s, "
+                "temp_range=[%.2f, %.2f]",
+                config.rnd_coef, config.rnd_adaptive_temp,
+                config.rnd_temp_min, config.rnd_temp_max,
+            )
+
+        # Observations collected for RND predictor training
+        self._rnd_observations: list = []
 
         # Checkpoint manager
         self.ckpt_manager = CheckpointManager(config)
@@ -145,6 +160,8 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
+            if self.rnd is not None:
+                self._player1.rnd = self.rnd
         return self._player1
 
     def _get_or_create_player2(self) -> RLPlayer:
@@ -158,6 +175,8 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
+            if self.rnd is not None:
+                self._player2.rnd = self.rnd
         return self._player2
 
     def _get_or_create_eval_player1(self) -> RLPlayer:
@@ -267,6 +286,16 @@ class Trainer:
         self._league_opponent_id = league_agent.agent_id
         self._league_opponent_team_id = team_id
         return self._league_opponent_player
+
+    def _get_effective_rnd_coef(self) -> float:
+        """Compute the RND intrinsic reward coefficient with optional annealing."""
+        cfg = self.config
+        if not cfg.rnd_enabled:
+            return 0.0
+        if cfg.rnd_anneal_battles > 0:
+            progress = min(1.0, self.battle_count / cfg.rnd_anneal_battles)
+            return cfg.rnd_coef + progress * (cfg.rnd_coef_end - cfg.rnd_coef)
+        return cfg.rnd_coef
 
     def _get_effective_entropy_coef(self) -> float:
         """Compute the entropy coefficient with annealing and plateau bump."""
@@ -530,6 +559,16 @@ class Trainer:
             if meta is not None:
                 self._team1_wr_ema = meta.get("team1_wr_ema", 0.5)
                 self._team2_wr_ema = meta.get("team2_wr_ema", 0.5)
+
+            # Restore RND state if available
+            if self.rnd is not None:
+                import torch as _torch
+                rnd_path = Path(self.config.checkpoint_dir) / "rnd_state.pt"
+                if rnd_path.exists():
+                    rnd_state = _torch.load(rnd_path, map_location="cpu", weights_only=False)
+                    self.rnd.load_state_dict(rnd_state)
+                    logger.info("Restored RND state from checkpoint")
+
             logger.info(f"Resumed from battle {self.battle_count}")
 
     def _fresh_start_from_checkpoint(self):
@@ -998,6 +1037,19 @@ class Trainer:
             else:
                 step.reward = surv
 
+        # Add RND intrinsic novelty rewards
+        if self.rnd is not None and len(observations) > 0:
+            intrinsic = self.rnd.compute_intrinsic_rewards(observations)
+            rnd_coef = self._get_effective_rnd_coef()
+            # intrinsic has one value per observation; pending steps correspond
+            # to transitions (obs[i] -> obs[i+1]), so use observations[:-1]
+            for j, step in enumerate(pending):
+                if j < len(intrinsic) - 1:
+                    step.reward += rnd_coef * intrinsic[j]
+
+            # Collect observations for RND predictor training
+            self._rnd_observations.extend(observations)
+
     def _inject_param_noise(self):
         """Inject small Gaussian noise into policy parameters to escape plateaus."""
         import torch
@@ -1057,6 +1109,22 @@ class Trainer:
                 msg += f", uncertainty={metrics2['mean_uncertainty']:.4f}"
             logger.debug(msg)
 
+        # Train RND predictor on collected observations
+        if self.rnd is not None and len(self._rnd_observations) > 0:
+            rnd_loss = self.rnd.train_predictor(self._rnd_observations)
+            rnd_coef = self._get_effective_rnd_coef()
+            self._latest_metrics['rnd_loss'] = rnd_loss
+            self._latest_metrics['rnd_coef'] = rnd_coef
+            self._latest_metrics['rnd_reward_mean'] = self.rnd.reward_stats.mean
+            self._latest_metrics['rnd_novelty_mean'] = self.rnd.novelty_stats.mean
+            logger.debug(
+                "  RND update: loss=%.4f, coef=%.4f, reward_mean=%.4f, "
+                "novelty_mean=%.4f",
+                rnd_loss, rnd_coef,
+                self.rnd.reward_stats.mean, self.rnd.novelty_stats.mean,
+            )
+            self._rnd_observations.clear()
+
     def _update_preview(self):
         """Run PPO updates for both agents' team preview policies.
 
@@ -1104,6 +1172,12 @@ class Trainer:
                 "team2_wr_ema": self._team2_wr_ema,
             },
         )
+
+        # Save RND state alongside checkpoint
+        if self.rnd is not None:
+            import torch as _torch
+            rnd_path = Path(self.config.checkpoint_dir) / "rnd_state.pt"
+            _torch.save(self.rnd.state_dict(), rnd_path)
 
         # Compute exploitation win rates vs opposing team's best league agent
         exploit_wr1 = self._exploit_win_rate(self.agent1.agent_id, opponent_team=1)

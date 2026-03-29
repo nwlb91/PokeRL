@@ -216,8 +216,18 @@ class PPOAgent:
     def select_battle_action(
         self, obs: np.ndarray, action_mask: np.ndarray, deterministic: bool = False,
         matchup_context: Optional[np.ndarray] = None,
+        temperature: float = 1.0,
     ) -> Tuple[int, float, float]:
         """Select a battle action using the policy network.
+
+        Args:
+            obs: Battle observation.
+            action_mask: Binary mask of legal actions.
+            deterministic: If True, select the greedy action.
+            matchup_context: Optional matchup conditioning for value head.
+            temperature: Logit temperature for exploration.  Values > 1
+                produce a more uniform (exploratory) distribution; values < 1
+                produce a more peaked (exploitative) distribution.
 
         Returns:
             (action, log_prob, value)
@@ -232,6 +242,10 @@ class PPOAgent:
             logits, value = self.battle_net(
                 obs_t, mask_t, deterministic=deterministic, matchup_context=ctx_t,
             )
+
+            # Apply temperature scaling for novelty-driven exploration
+            if temperature != 1.0 and not deterministic:
+                logits = logits / temperature
 
             dist = torch.distributions.Categorical(logits=logits)
             if deterministic:

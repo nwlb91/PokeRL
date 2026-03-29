@@ -104,6 +104,9 @@ class RLPlayer(Player):
         # (e.g. team WR EMA for matchup-conditioned value head)
         self.matchup_context: Optional[np.ndarray] = None
 
+        # RND exploration module (set by trainer when rnd_enabled)
+        self.rnd = None
+
         # Per-battle state keyed by battle.battle_tag
         self._episode_states: Dict[str, _BattleEpisodeState] = {}
 
@@ -197,9 +200,17 @@ class RLPlayer(Player):
             )
             state.pending_steps.append(step)
 
+        # Compute novelty-based temperature for adaptive exploration
+        temperature = 1.0
+        if (self.rnd is not None
+                and self.config.rnd_adaptive_temp
+                and not self.deterministic):
+            temperature = self.rnd.compute_novelty_temperature(obs)
+
         action, log_prob, value = self.agent.select_battle_action(
             obs, action_mask, deterministic=self.deterministic,
             matchup_context=self.matchup_context,
+            temperature=temperature,
         )
 
         # Store for next step

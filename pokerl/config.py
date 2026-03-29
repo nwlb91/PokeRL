@@ -112,6 +112,18 @@ class Config:
     battle_timeout: float = 300.0  # seconds; timeout per battle_against call
     device: str = "cpu"
 
+    # --- RND state-space exploration ---
+    rnd_enabled: bool = False              # master toggle (off by default for backward compat)
+    rnd_coef: float = 0.1                  # intrinsic reward coefficient
+    rnd_coef_end: float = 0.01             # final coefficient after annealing
+    rnd_anneal_battles: int = 50000        # battles over which to anneal rnd_coef (0 = no anneal)
+    rnd_embedding_dim: int = 64            # RND embedding dimension
+    rnd_hidden_size: int = 256             # RND network hidden size
+    rnd_lr: float = 1e-3                   # predictor learning rate
+    rnd_adaptive_temp: bool = True         # enable novelty-based temperature scaling during action selection
+    rnd_temp_min: float = 0.8              # temperature floor (familiar states)
+    rnd_temp_max: float = 2.0              # temperature ceiling (novel states)
+
     # --- Plateau response ---
     plateau_action: str = "entropy_bump"  # "entropy_bump", "noise_inject", or "none"
     plateau_entropy_bump: float = 0.03    # temporary entropy increase on plateau
@@ -150,6 +162,19 @@ class Config:
         _check_range("main_agent_fraction", self.main_agent_fraction, 0.0, 1.0)
         _check_range("pfsp_fraction", self.pfsp_fraction, 0.0, 1.0)
         _check_range("self_play_fraction", self.self_play_fraction, 0.0, 1.0)
+        _check_positive("rnd_coef", self.rnd_coef, allow_zero=True)
+        _check_positive("rnd_coef_end", self.rnd_coef_end, allow_zero=True)
+        _check_positive("rnd_anneal_battles", self.rnd_anneal_battles, allow_zero=True)
+        _check_positive("rnd_embedding_dim", self.rnd_embedding_dim)
+        _check_positive("rnd_hidden_size", self.rnd_hidden_size)
+        _check_positive("rnd_lr", self.rnd_lr)
+        _check_positive("rnd_temp_min", self.rnd_temp_min)
+        _check_positive("rnd_temp_max", self.rnd_temp_max)
+        if self.rnd_temp_min > self.rnd_temp_max:
+            raise ValueError(
+                f"rnd_temp_min ({self.rnd_temp_min}) must be <= "
+                f"rnd_temp_max ({self.rnd_temp_max})"
+            )
         if self.lr_schedule not in ("constant", "cosine", "reduce_on_plateau"):
             raise ValueError(
                 f"lr_schedule must be 'constant', 'cosine', or 'reduce_on_plateau', "
