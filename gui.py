@@ -674,7 +674,8 @@ class PokeRLApp(tk.Tk):
                             greedy_eval_results: "list | None" = None,
                             train_wr_history: "list | None" = None,
                             baseline_eval_results_team1: "list | None" = None,
-                            baseline_eval_results_team2: "list | None" = None):
+                            baseline_eval_results_team2: "list | None" = None,
+                            **kwargs):
         """Update progress bar, time labels, and training charts."""
         pct = battle_count / total_battles * 100 if total_battles else 0
         self.train_progress["value"] = pct

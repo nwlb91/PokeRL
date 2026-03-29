@@ -148,6 +148,12 @@ def parse_args():
     parser.add_argument("--device", default="cpu",
                         help="Device for training (cpu/cuda)")
 
+    # Dashboard
+    parser.add_argument("--dashboard", action="store_true",
+                        help="Enable web dashboard for monitoring training")
+    parser.add_argument("--dashboard-port", type=int, default=5555,
+                        help="Port for the web dashboard (default: 5555)")
+
     # Logging & cloud
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -244,12 +250,20 @@ def main():
             f"heads={config.uncertainty_heads}, weight={config.uncertainty_weight}"
         )
 
+    # Optional web dashboard
+    progress_callback = None
+    if args.dashboard:
+        from pokerl.dashboard import start_dashboard, update_dashboard
+        start_dashboard(port=args.dashboard_port)
+        progress_callback = update_dashboard
+
     # Create trainer and run
     server_cfg = ServerConfiguration(
         f"ws://{config.server_url}:{config.server_port}/showdown/websocket",
         f"http://{config.server_url}:{config.server_port}/action.php?",
     )
-    trainer = Trainer(config, server_configuration=server_cfg)
+    trainer = Trainer(config, server_configuration=server_cfg,
+                      progress_callback=progress_callback)
 
     asyncio.run(trainer.train())
 

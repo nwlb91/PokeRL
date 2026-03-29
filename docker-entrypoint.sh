@@ -30,14 +30,19 @@ cleanup() {
 }
 trap cleanup EXIT SIGTERM SIGINT
 
+DASHBOARD_PORT="${DASHBOARD_PORT:-5555}"
+
 # Launch training, forwarding any extra arguments
 mkdir -p /app/logs
 echo "[entrypoint] Starting training..."
+echo "[entrypoint] Dashboard: http://localhost:${DASHBOARD_PORT}"
 exec python train.py \
     --headless \
     --log-file "${LOG_FILE}" \
     --server-url localhost \
     --server-port "${SHOWDOWN_PORT}" \
     --checkpoint-dir /app/checkpoints \
+    --dashboard \
+    --dashboard-port "${DASHBOARD_PORT}" \
     --resume \
     "$@"

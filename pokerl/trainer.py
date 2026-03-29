@@ -832,6 +832,11 @@ class Trainer:
                     self.train_wr_history,
                     self.baseline_eval_results_team1,
                     self.baseline_eval_results_team2,
+                    league_size=len(self.league.agents),
+                    agent1_wins=self.agent1.wins,
+                    agent1_losses=self.agent1.losses,
+                    agent2_wins=self.agent2.wins,
+                    agent2_losses=self.agent2.losses,
                 )
 
         # Final checkpoint

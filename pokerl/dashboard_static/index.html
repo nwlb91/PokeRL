@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PokeRL Training Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d28;
+    --border: #2a2d3a;
+    --text: #e1e4ed;
+    --dim: #8b8fa3;
+    --accent: #6c8cff;
+    --green: #4caf7c;
+    --red: #e05555;
+    --orange: #e0a050;
+    --purple: #b068e0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+  }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--green);
+    display: inline-block;
+    animation: pulse 2s infinite;
+  }
+  .status-dot.stale { background: var(--orange); animation: none; }
+  .status-dot.offline { background: var(--red); animation: none; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .stat-label { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-value { font-size: 1.5rem; font-weight: 700; margin-top: 4px; }
+  .stat-sub { font-size: 0.75rem; color: var(--dim); margin-top: 2px; }
+
+  .charts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+    gap: 16px;
+  }
+  .chart-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .chart-card h2 { font-size: 0.9rem; font-weight: 600; margin-bottom: 12px; }
+  .chart-card canvas { width: 100% !important; }
+
+  .plateau-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .plateau-badge.learning { background: #1b3a2a; color: var(--green); }
+  .plateau-badge.plateau { background: #3a1b1b; color: var(--red); }
+  .plateau-badge.unknown { background: #2a2d3a; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<h1>
+  <span class="status-dot" id="statusDot"></span>
+  PokeRL Training Dashboard
+  <span id="plateauBadge" class="plateau-badge unknown">--</span>
+</h1>
+
+<div class="stats-row" id="statsRow">
+  <div class="stat-card">
+    <div class="stat-label">Battles</div>
+    <div class="stat-value" id="battleCount">--</div>
+    <div class="stat-sub" id="battleSub"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Train WR</div>
+    <div class="stat-value" id="trainWR">--</div>
+    <div class="stat-sub" id="trainWRSub"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Greedy WR</div>
+    <div class="stat-value" id="greedyWR">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">League Size</div>
+    <div class="stat-value" id="leagueSize">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Agent 1</div>
+    <div class="stat-value" id="agent1">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Agent 2</div>
+    <div class="stat-value" id="agent2">--</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Elapsed</div>
+    <div class="stat-value" id="elapsed">--</div>
+  </div>
+</div>
+
+<div class="charts-grid">
+  <div class="chart-card">
+    <h2>Win Rate</h2>
+    <canvas id="chartWR"></canvas>
+  </div>
+  <div class="chart-card">
+    <h2>Policy &amp; Value Loss</h2>
+    <canvas id="chartLoss"></canvas>
+  </div>
+  <div class="chart-card">
+    <h2>Entropy</h2>
+    <canvas id="chartEntropy"></canvas>
+  </div>
+  <div class="chart-card">
+    <h2>Explained Variance &amp; Episode Return</h2>
+    <canvas id="chartValue"></canvas>
+  </div>
+</div>
+
+<script>
+const POLL_INTERVAL = 3000;
+const chartOpts = (yMin, yMax) => ({
+  responsive: true,
+  animation: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
+  scales: {
+    x: { ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: '#2a2d3a' } },
+    y: { min: yMin, max: yMax, ticks: { color: '#8b8fa3' }, grid: { color: '#2a2d3a' } },
+  }
+});
+
+const dualAxisOpts = () => ({
+  responsive: true,
+  animation: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
+  scales: {
+    x: { ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: '#2a2d3a' } },
+    y: { position: 'left', ticks: { color: '#8b8fa3' }, grid: { color: '#2a2d3a' } },
+    y2: { position: 'right', ticks: { color: '#8b8fa3' }, grid: { drawOnChartArea: false } },
+  }
+});
+
+function makeDataset(label, color, yAxis) {
+  const ds = { label, borderColor: color, backgroundColor: color + '20', data: [], pointRadius: 0, borderWidth: 2, tension: 0.3 };
+  if (yAxis) ds.yAxisID = yAxis;
+  return ds;
+}
+
+const wrChart = new Chart(document.getElementById('chartWR'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      makeDataset('Train WR', '#6c8cff'),
+      makeDataset('Greedy WR', '#4caf7c'),
+      makeDataset('Baseline T1', '#e0a050'),
+      makeDataset('Baseline T2', '#b068e0'),
+    ]
+  },
+  options: chartOpts(0, 1)
+});
+
+const lossChart = new Chart(document.getElementById('chartLoss'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      makeDataset('Policy Loss', '#e05555'),
+      makeDataset('Value Loss', '#6c8cff'),
+    ]
+  },
+  options: chartOpts(undefined, undefined)
+});
+
+const entropyChart = new Chart(document.getElementById('chartEntropy'), {
+  type: 'line',
+  data: { labels: [], datasets: [makeDataset('Entropy', '#4caf7c')] },
+  options: chartOpts(0, undefined)
+});
+
+const valueChart = new Chart(document.getElementById('chartValue'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [
+      makeDataset('Explained Var', '#6c8cff', 'y'),
+      makeDataset('Episode Return', '#e0a050', 'y2'),
+    ]
+  },
+  options: dualAxisOpts()
+});
+
+function formatTime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function pct(v) { return (v * 100).toFixed(1) + '%'; }
+
+function updateChartSeries(chart, datasetIdx, points) {
+  const labels = points.map(p => p[0]);
+  const values = points.map(p => p[1]);
+  // Use longest label set
+  if (labels.length > chart.data.labels.length) {
+    chart.data.labels = labels;
+  }
+  chart.data.datasets[datasetIdx].data = values;
+}
+
+function updateMetricChart(chart, datasetIdx, metrics, key) {
+  const labels = metrics.map(m => m.battle_count);
+  const values = metrics.filter(m => m[key] !== undefined).map(m => m[key]);
+  const bLabels = metrics.filter(m => m[key] !== undefined).map(m => m.battle_count);
+  if (bLabels.length > chart.data.labels.length) {
+    chart.data.labels = bLabels;
+  }
+  chart.data.datasets[datasetIdx].data = values;
+}
+
+let lastBattle = 0;
+let lastUpdate = Date.now();
+
+async function poll() {
+  try {
+    const res = await fetch('/api/metrics');
+    const d = await res.json();
+    lastUpdate = Date.now();
+
+    // Status dot
+    document.getElementById('statusDot').className = 'status-dot';
+
+    // Stats
+    document.getElementById('battleCount').textContent = d.battle_count.toLocaleString();
+    const totalStr = d.total_battles > 0 ? ' / ' + d.total_battles.toLocaleString() : '';
+    document.getElementById('battleSub').textContent = totalStr;
+
+    if (d.train_wr.length > 0) {
+      const latest = d.train_wr[d.train_wr.length - 1][1];
+      document.getElementById('trainWR').textContent = pct(latest);
+    }
+    if (d.greedy_wr.length > 0) {
+      const latest = d.greedy_wr[d.greedy_wr.length - 1][1];
+      document.getElementById('greedyWR').textContent = pct(latest);
+    }
+    document.getElementById('leagueSize').textContent = d.league_size;
+    document.getElementById('agent1').textContent = d.agent1_wins + 'W / ' + d.agent1_losses + 'L';
+    document.getElementById('agent2').textContent = d.agent2_wins + 'W / ' + d.agent2_losses + 'L';
+
+    const elapsed = Date.now() / 1000 - d.start_time;
+    document.getElementById('elapsed').textContent = formatTime(elapsed);
+
+    // Plateau badge
+    const badge = document.getElementById('plateauBadge');
+    if (d.plateau) {
+      if (d.plateau.is_plateau) {
+        badge.className = 'plateau-badge plateau';
+        badge.textContent = 'Plateau (streak ' + d.plateau.streak + ')';
+      } else {
+        badge.className = 'plateau-badge learning';
+        badge.textContent = 'Learning';
+      }
+    } else {
+      badge.className = 'plateau-badge unknown';
+      badge.textContent = 'Collecting data';
+    }
+
+    // Charts
+    updateChartSeries(wrChart, 0, d.train_wr);
+    updateChartSeries(wrChart, 1, d.greedy_wr);
+    updateChartSeries(wrChart, 2, d.baseline_team1);
+    updateChartSeries(wrChart, 3, d.baseline_team2);
+    wrChart.update();
+
+    if (d.metrics.length > 0) {
+      updateMetricChart(lossChart, 0, d.metrics, 'policy_loss');
+      updateMetricChart(lossChart, 1, d.metrics, 'value_loss');
+      lossChart.update();
+
+      updateMetricChart(entropyChart, 0, d.metrics, 'entropy');
+      entropyChart.update();
+
+      updateMetricChart(valueChart, 0, d.metrics, 'explained_variance');
+      updateMetricChart(valueChart, 1, d.metrics, 'mean_episode_return');
+      valueChart.update();
+    }
+
+    lastBattle = d.battle_count;
+  } catch (e) {
+    document.getElementById('statusDot').className = 'status-dot offline';
+  }
+}
+
+// Mark stale if no update for 30s
+setInterval(() => {
+  if (Date.now() - lastUpdate > 30000) {
+    document.getElementById('statusDot').className = 'status-dot stale';
+  }
+}, 5000);
+
+poll();
+setInterval(poll, POLL_INTERVAL);
+</script>
+</body>
+</html>

@@ -62,7 +62,9 @@ trap cleanup EXIT SIGTERM SIGINT
 # ----------------------------------------------------------
 # Step 4: Launch training
 # ----------------------------------------------------------
+DASHBOARD_PORT="${DASHBOARD_PORT:-5555}"
 echo "[launcher] Starting training... (logs: ${LOG_FILE})"
+echo "[launcher] Dashboard: http://localhost:${DASHBOARD_PORT}"
 echo "[launcher] Press Ctrl+C to stop."
 python "${SCRIPT_DIR}/train.py" \
     --headless \
@@ -70,5 +72,7 @@ python "${SCRIPT_DIR}/train.py" \
     --server-url localhost \
     --server-port "${SHOWDOWN_PORT}" \
     --checkpoint-dir "${SCRIPT_DIR}/checkpoints" \
+    --dashboard \
+    --dashboard-port "${DASHBOARD_PORT}" \
     --resume \
     "$@"

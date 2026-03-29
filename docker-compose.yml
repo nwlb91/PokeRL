@@ -6,6 +6,8 @@ services:
       - ./checkpoints:/app/checkpoints
       - ./logs:/app/logs
       - ./teams:/app/teams
+    ports:
+      - "5555:5555"
     restart: unless-stopped
     # Pass extra training args after the image name, e.g.:
     #   docker compose run pokerl --total-battles 50000 --infinite

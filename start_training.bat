@@ -60,7 +60,9 @@ echo [launcher] Showdown is ready.
 :: ----------------------------------------------------------
 :: Step 4: Launch training
 :: ----------------------------------------------------------
+set DASHBOARD_PORT=5555
 echo [launcher] Starting training... (logs: %LOG_FILE%)
+echo [launcher] Dashboard: http://localhost:%DASHBOARD_PORT%
 echo [launcher] Press Ctrl+C to stop.
 python "%~dp0train.py" ^
     --headless ^
@@ -68,6 +70,8 @@ python "%~dp0train.py" ^
     --server-url localhost ^
     --server-port %SHOWDOWN_PORT% ^
     --checkpoint-dir "%~dp0checkpoints" ^
+    --dashboard ^
+    --dashboard-port %DASHBOARD_PORT% ^
     --resume ^
     %*
 
