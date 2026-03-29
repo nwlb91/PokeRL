@@ -49,6 +49,7 @@ def update_dashboard(
     agent1_losses=0,
     agent2_wins=0,
     agent2_losses=0,
+    **kwargs,
 ):
     """Progress callback compatible with Trainer._progress_callback signature."""
     with _lock:
@@ -66,15 +67,17 @@ def update_dashboard(
         _state["agent2_losses"] = agent2_losses
 
         if plateau_detector is not None:
-            info = plateau_detector.latest_info
-            if info:
+            try:
+                is_plateau = plateau_detector._streak >= plateau_detector.patience
                 _state["plateau"] = {
-                    "is_plateau": info.is_plateau,
-                    "streak": info.streak,
-                    "slope": round(info.slope, 6),
+                    "is_plateau": is_plateau,
+                    "streak": plateau_detector._streak,
+                    "slope": 0.0,
                 }
-            else:
+            except AttributeError:
                 _state["plateau"] = None
+        else:
+            _state["plateau"] = None
 
 
 def _create_app() -> Flask:
