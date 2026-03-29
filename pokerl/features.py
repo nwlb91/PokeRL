@@ -11,8 +11,12 @@ neural network input. Covers:
   - Team preview state
 """
 
+import logging
+
 import numpy as np
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from poke_env.battle.abstract_battle import AbstractBattle
 from poke_env.battle.battle import Battle
@@ -246,6 +250,10 @@ def embed_battle(battle: Battle) -> np.ndarray:
     if battle.dynamax_turns_left is not None:
         buf[o+13] = battle.dynamax_turns_left / 3.0
 
+    if not np.isfinite(buf).all():
+        logger.warning("Non-finite values in battle observation (turn %d), replacing with zeros", battle.turn)
+        np.nan_to_num(buf, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+
     return buf
 
 
@@ -265,6 +273,11 @@ def embed_team_preview(battle: Battle) -> np.ndarray:
     _encode_team_pokemon_into(buf, 0, battle.team)
     _encode_team_pokemon_into(buf, 330, battle.opponent_team)
     buf[660] = battle.gen / 9.0
+
+    if not np.isfinite(buf).all():
+        logger.warning("Non-finite values in team preview observation, replacing with zeros")
+        np.nan_to_num(buf, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+
     return buf
 
 

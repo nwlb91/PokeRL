@@ -69,7 +69,7 @@ class LeagueAgent:
         """Lazy-load weights from disk if not already cached."""
         if self._state_dict is None:
             self._state_dict = torch.load(
-                self.checkpoint_path, map_location="cpu", weights_only=False
+                self.checkpoint_path, map_location="cpu", weights_only=True
             )
         return self._state_dict
 

@@ -36,7 +36,7 @@ class CheckpointManager:
         if not latest_path.exists():
             return None
         try:
-            state = torch.load(latest_path, map_location="cpu", weights_only=False)
+            state = torch.load(latest_path, map_location="cpu", weights_only=True)
             return state.get("metadata")
         except Exception:
             return None
@@ -127,7 +127,7 @@ class CheckpointManager:
         wp_estimator: WinProbabilityEstimator,
     ) -> int:
         logger.info(f"Loading checkpoint from {path}")
-        state = torch.load(path, map_location="cpu", weights_only=False)
+        state = torch.load(path, map_location="cpu", weights_only=True)
 
         agent1.load_state_dict(state["agent1"])
         agent2.load_state_dict(state["agent2"])
@@ -203,12 +203,12 @@ class CheckpointManager:
         t2_path = self.checkpoint_dir / "best_team2.pt"
 
         if t1_path.exists():
-            a1_state = torch.load(t1_path, map_location="cpu", weights_only=False)["agent"]
+            a1_state = torch.load(t1_path, map_location="cpu", weights_only=True)["agent"]
         else:
             a1_state = agent1.get_state_dict()
 
         if t2_path.exists():
-            a2_state = torch.load(t2_path, map_location="cpu", weights_only=False)["agent"]
+            a2_state = torch.load(t2_path, map_location="cpu", weights_only=True)["agent"]
         else:
             a2_state = agent2.get_state_dict()
 

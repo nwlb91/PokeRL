@@ -134,7 +134,7 @@ class WinProbabilityEstimator:
         obs_t = torch.from_numpy(obs_batch).to(self.device)
         labels_t = torch.from_numpy(labels).to(self.device)
 
-        preds = self.net(obs_t)
+        preds = self.net(obs_t).clamp(1e-7, 1 - 1e-7)
         loss = F.binary_cross_entropy(preds, labels_t)
 
         self.optimizer.zero_grad(set_to_none=True)

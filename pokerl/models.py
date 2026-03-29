@@ -257,8 +257,10 @@ class TeamPreviewNet(nn.Module):
                               action: torch.Tensor = None,
                               deterministic: bool = False,
                               detach_uncertainty: bool = False,
-                              matchup_context: torch.Tensor = None):
-        # matchup_context accepted for API compatibility but unused by preview net
+                              matchup_context: torch.Tensor = None):  # noqa: ARG002
+        # matchup_context is unused by the preview net but accepted here so
+        # PPOAgent._ppo_update() can call battle_net and preview_net with the
+        # same interface without branching.
         logits, value = self.forward(
             obs, mask,
             deterministic=deterministic,

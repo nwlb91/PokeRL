@@ -94,15 +94,12 @@ def get_action_mask(battle: Battle, config: Config) -> np.ndarray:
                 if config.num_gimmicks >= 4 and battle.can_tera:
                     mask[22 + i] = 1.0
 
-    # If nothing is legal (shouldn't happen), default to first action
+    # If nothing is legal, this indicates a bug in battle state reading
     if mask.sum() == 0:
-        logger.warning(
-            "Action mask is all zeros — no legal actions detected. "
-            "Falling back to action 0. This may indicate a bug in "
-            "battle state reading (turn %d).",
-            battle.turn,
+        raise RuntimeError(
+            f"Action mask is all zeros — no legal actions detected on turn "
+            f"{battle.turn}. This indicates a bug in battle state reading."
         )
-        mask[0] = 1.0
 
     return mask
 

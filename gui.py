@@ -1100,14 +1100,14 @@ class PokeRLApp(tk.Tk):
                         break
 
                     t_name = Path(t_path).stem
-                    t_state = torch.load(t_path, map_location="cpu", weights_only=False)
+                    t_state = torch.load(t_path, map_location="cpu", weights_only=True)
 
                     for o_path in opp_models:
                         if self._training_stop.is_set():
                             break
 
                         o_name = Path(o_path).stem
-                        o_state = torch.load(o_path, map_location="cpu", weights_only=False)
+                        o_state = torch.load(o_path, map_location="cpu", weights_only=True)
 
                         self._log(f"Evaluating {t_name} vs {o_name} ({n_battles} battles)...")
                         self.after(0, lambda: self.eval_status_var.set(f"{t_name} vs {o_name}..."))
@@ -1245,7 +1245,7 @@ class PokeRLApp(tk.Tk):
                     battle_format=battle_format,
                     device="cpu",
                 )
-                state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
                 agent = PPOAgent(config, agent_id="challenger")
                 # Load agent weights (inference-only, no optimizer state needed)
                 if "agent" in state:
