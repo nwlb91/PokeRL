@@ -27,6 +27,25 @@ logger = logging.getLogger(__name__)
 
 
 
+def _config_to_dict(config: Config) -> dict:
+    """Extract all architecture-relevant config fields for checkpoint storage."""
+    return {
+        "battle_format": config.battle_format,
+        "hidden_size": config.hidden_size,
+        "num_layers": config.num_layers,
+        "action_size": config.action_size,
+        "team_sheet_obs": config.team_sheet_obs,
+        "use_lstm": config.use_lstm,
+        "lstm_hidden_size": config.lstm_hidden_size,
+        "q_head_enabled": config.q_head_enabled,
+        "search_weight": config.search_weight,
+        "q_value_coef": config.q_value_coef,
+        "uncertainty_heads": config.uncertainty_heads,
+        "uncertainty_weight": config.uncertainty_weight,
+        "matchup_conditioned_value": config.matchup_conditioned_value,
+    }
+
+
 class CheckpointManager:
     """Manages periodic saving and loading of training state."""
 
@@ -67,12 +86,7 @@ class CheckpointManager:
             "league": league.get_state_dict(),
             "wp_estimator": wp_estimator.get_state_dict(),
             "battle_count": battle_count,
-            "config": {
-                "battle_format": self.config.battle_format,
-                "hidden_size": self.config.hidden_size,
-                "num_layers": self.config.num_layers,
-                "action_size": self.config.action_size,
-            },
+            "config": _config_to_dict(self.config),
         }
         if extra_metadata:
             state["metadata"] = extra_metadata
@@ -159,12 +173,7 @@ class CheckpointManager:
             "league": league.get_state_dict(),
             "wp_estimator": wp_estimator.get_state_dict(),
             "battle_count": battle_count,
-            "config": {
-                "battle_format": self.config.battle_format,
-                "hidden_size": self.config.hidden_size,
-                "num_layers": self.config.num_layers,
-                "action_size": self.config.action_size,
-            },
+            "config": _config_to_dict(self.config),
             "metadata": {"best_win_rate": win_rate, "battle_count": battle_count},
         }
         best_path = self.checkpoint_dir / "best.pt"
@@ -182,6 +191,7 @@ class CheckpointManager:
         state = {
             "agent": agent.get_state_dict(),
             "battle_count": battle_count,
+            "config": _config_to_dict(self.config),
             "metadata": {"team_id": team_id, "win_rate": win_rate},
         }
         path = self.checkpoint_dir / f"best_team{team_id + 1}.pt"
@@ -223,12 +233,7 @@ class CheckpointManager:
             "league": league.get_state_dict(),
             "wp_estimator": wp_estimator.get_state_dict(),
             "battle_count": battle_count,
-            "config": {
-                "battle_format": self.config.battle_format,
-                "hidden_size": self.config.hidden_size,
-                "num_layers": self.config.num_layers,
-                "action_size": self.config.action_size,
-            },
+            "config": _config_to_dict(self.config),
             "metadata": {"combined_best": True, "battle_count": battle_count},
         }
         best_path = self.checkpoint_dir / "best.pt"

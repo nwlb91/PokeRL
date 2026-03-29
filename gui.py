@@ -1385,11 +1385,27 @@ class PokeRLApp(tk.Tk):
                 team_str = load_team(team_path)
 
                 # Load checkpoint and create agent
+                state = torch.load(ckpt_path, **_TORCH_LOAD_KWARGS)
+
+                # Restore architecture config from checkpoint when available,
+                # falling back to defaults for older checkpoints.
+                saved_cfg = state.get("config", {})
                 config = Config(
                     battle_format=battle_format,
                     device="cpu",
+                    hidden_size=saved_cfg.get("hidden_size", 256),
+                    num_layers=saved_cfg.get("num_layers", 3),
+                    team_sheet_obs=saved_cfg.get("team_sheet_obs", False),
+                    use_lstm=saved_cfg.get("use_lstm", False),
+                    lstm_hidden_size=saved_cfg.get("lstm_hidden_size", 256),
+                    q_head_enabled=saved_cfg.get("q_head_enabled", False),
+                    search_weight=saved_cfg.get("search_weight", 1.0),
+                    q_value_coef=saved_cfg.get("q_value_coef", 0.25),
+                    uncertainty_heads=saved_cfg.get("uncertainty_heads", 3),
+                    uncertainty_weight=saved_cfg.get("uncertainty_weight", 0.5),
+                    matchup_conditioned_value=saved_cfg.get("matchup_conditioned_value", True),
                 )
-                state = torch.load(ckpt_path, **_TORCH_LOAD_KWARGS)
+
                 agent = PPOAgent(config, agent_id="challenger")
                 # Load agent weights (inference-only, no optimizer state needed)
                 if "agent" in state:
@@ -1407,6 +1423,14 @@ class PokeRLApp(tk.Tk):
                         "Checkpoint does not contain agent, agent1, or agent2 keys."
                     )
                 agent.set_eval()
+
+                # Parse team sheets for extended observations if needed
+                our_team_moves = None
+                opp_team_moves = None
+                if config.team_sheet_obs:
+                    from pokerl.teamsheet import parse_team
+                    parsed = parse_team(team_str)
+                    our_team_moves = parsed.get_move_objects(config.gen)
 
                 acct = AccountConfiguration(username, password or None)
 
@@ -1433,6 +1457,12 @@ class PokeRLApp(tk.Tk):
                             server_configuration=server_cfg,
                             max_concurrent_battles=1,
                         )
+                        # Attach team sheet data for extended observations
+                        if our_team_moves is not None:
+                            player.our_team_moves = our_team_moves
+                            # Opponent moves unknown in challenge mode;
+                            # embed_team_preview will use extended encoding
+                            # for our side but standard for opponent.
                         await player.send_challenges(opponent, n_challenges=1)
                         won = player.n_won_battles > 0
                         return won
