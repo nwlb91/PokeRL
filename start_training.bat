@@ -65,10 +65,12 @@ echo [launcher] Showdown is ready.
 :: Step 4: Launch training
 :: ----------------------------------------------------------
 set DASHBOARD_PORT=5555
+set ERROR_LOG=%~dp0logs\errors.log
 echo [launcher] Starting training... (logs: %LOG_FILE%)
+echo [launcher] Errors: %ERROR_LOG%
 echo [launcher] Dashboard: http://localhost:%DASHBOARD_PORT%
 echo [launcher] Press Ctrl+C to stop.
-python "%~dp0train.py" ^
+python -u "%~dp0train.py" ^
     --headless ^
     --log-file "%LOG_FILE%" ^
     --server-url localhost ^
@@ -77,7 +79,21 @@ python "%~dp0train.py" ^
     --dashboard ^
     --dashboard-port %DASHBOARD_PORT% ^
     --resume ^
-    %*
+    %* 2>>"%ERROR_LOG%"
 
+if errorlevel 1 (
+    echo.
+    echo ============================================================
+    echo [launcher] Training exited with an error. Recent errors:
+    echo ============================================================
+    type "%ERROR_LOG%"
+    echo.
+    echo ============================================================
+    echo [launcher] Full error log saved to: %ERROR_LOG%
+    echo [launcher] Full training log at: %LOG_FILE%
+    echo ============================================================
+)
+
+echo.
 echo [launcher] Training stopped.
 pause
