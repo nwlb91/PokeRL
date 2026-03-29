@@ -211,6 +211,7 @@ class PokeRLApp(tk.Tk):
         # Challenge tab variables
         self.challenge_checkpoint_var = tk.StringVar(value="")
         self.challenge_team_var = tk.StringVar(value="")
+        self.challenge_opp_team_var = tk.StringVar(value="")
         self.challenge_server_var = tk.StringVar(value="local")  # "local" or "live"
         self.challenge_local_port_var = tk.IntVar(value=8000)
         self.challenge_username_var = tk.StringVar(value="")
@@ -498,9 +499,10 @@ class PokeRLApp(tk.Tk):
         model_frame.pack(fill="x", padx=6, pady=4)
 
         self._file_row(model_frame, "Checkpoint:", self.challenge_checkpoint_var, 0)
-        self._file_row(model_frame, "Team file:", self.challenge_team_var, 1)
+        self._file_row(model_frame, "Your team file:", self.challenge_team_var, 1)
+        self._file_row(model_frame, "Opponent team file:", self.challenge_opp_team_var, 2, optional=True)
 
-        ttk.Label(model_frame, text="Agent team:").grid(row=2, column=0, sticky="e", **PADDING)
+        ttk.Label(model_frame, text="Agent team:").grid(row=3, column=0, sticky="e", **PADDING)
         team_combo = ttk.Combobox(
             model_frame,
             textvariable=self.challenge_team_select_var,
@@ -508,12 +510,12 @@ class PokeRLApp(tk.Tk):
             state="readonly",
             width=10,
         )
-        team_combo.grid(row=2, column=1, sticky="w", **PADDING)
+        team_combo.grid(row=3, column=1, sticky="w", **PADDING)
         ttk.Label(
             model_frame,
             text="(only used for full checkpoints with both agents)",
             foreground="gray",
-        ).grid(row=2, column=2, sticky="w", **PADDING)
+        ).grid(row=3, column=2, sticky="w", **PADDING)
 
         # --- Server ---
         server_frame = ttk.LabelFrame(parent, text="Server")
@@ -1335,6 +1337,7 @@ class PokeRLApp(tk.Tk):
     def _on_send_challenge(self):
         ckpt_path = self.challenge_checkpoint_var.get().strip()
         team_path = self.challenge_team_var.get().strip()
+        opp_team_path = self.challenge_opp_team_var.get().strip()
         opponent = self.challenge_opponent_var.get().strip()
         username = self.challenge_username_var.get().strip()
 
@@ -1343,6 +1346,9 @@ class PokeRLApp(tk.Tk):
             return
         if not team_path or not os.path.isfile(team_path):
             messagebox.showerror("Error", f"Team file not found: {team_path}")
+            return
+        if opp_team_path and not os.path.isfile(opp_team_path):
+            messagebox.showerror("Error", f"Opponent team file not found: {opp_team_path}")
             return
         if not opponent:
             messagebox.showerror("Error", "Please enter an opponent username.")
@@ -1431,6 +1437,10 @@ class PokeRLApp(tk.Tk):
                     from pokerl.teamsheet import parse_team
                     parsed = parse_team(team_str)
                     our_team_moves = parsed.get_move_objects(config.gen)
+                    if opp_team_path:
+                        opp_team_str = load_team(opp_team_path)
+                        opp_parsed = parse_team(opp_team_str)
+                        opp_team_moves = opp_parsed.get_move_objects(config.gen)
 
                 acct = AccountConfiguration(username, password or None)
 
@@ -1460,9 +1470,8 @@ class PokeRLApp(tk.Tk):
                         # Attach team sheet data for extended observations
                         if our_team_moves is not None:
                             player.our_team_moves = our_team_moves
-                            # Opponent moves unknown in challenge mode;
-                            # embed_team_preview will use extended encoding
-                            # for our side but standard for opponent.
+                        if opp_team_moves is not None:
+                            player.opp_team_moves = opp_team_moves
                         await player.send_challenges(opponent, n_challenges=1)
                         won = player.n_won_battles > 0
                         return won
