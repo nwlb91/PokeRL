@@ -1,0 +1,11 @@
+services:
+  pokerl:
+    build: .
+    container_name: pokerl-training
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./logs:/app/logs
+      - ./teams:/app/teams
+    restart: unless-stopped
+    # Pass extra training args after the image name, e.g.:
+    #   docker compose run pokerl --total-battles 50000 --infinite

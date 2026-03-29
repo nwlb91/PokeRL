@@ -18,6 +18,8 @@ import asyncio
 import logging
 import sys
 
+from poke_env.ps_client.server_configuration import ServerConfiguration
+
 from pokerl.config import Config
 from pokerl.trainer import Trainer
 
@@ -243,7 +245,11 @@ def main():
         )
 
     # Create trainer and run
-    trainer = Trainer(config)
+    server_cfg = ServerConfiguration(
+        f"ws://{config.server_url}:{config.server_port}/showdown/websocket",
+        f"http://{config.server_url}:{config.server_port}/action.php?",
+    )
+    trainer = Trainer(config, server_configuration=server_cfg)
 
     asyncio.run(trainer.train())
 
