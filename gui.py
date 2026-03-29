@@ -134,6 +134,16 @@ class PokeRLApp(tk.Tk):
         self.concurrent_battles_var = tk.IntVar(value=4)
         self.eval_n_battles_var = tk.IntVar(value=50)
 
+        # Advanced feature toggles
+        self.team_sheet_obs_var = tk.BooleanVar(value=False)
+        self.use_lstm_var = tk.BooleanVar(value=False)
+        self.lstm_hidden_var = tk.IntVar(value=256)
+        self.q_head_var = tk.BooleanVar(value=False)
+        self.search_weight_var = tk.DoubleVar(value=1.0)
+        self.rnd_var = tk.BooleanVar(value=False)
+        self.rnd_coef_var = tk.DoubleVar(value=0.1)
+        self.rnd_adaptive_temp_var = tk.BooleanVar(value=True)
+
         # Challenge tab variables
         self.challenge_checkpoint_var = tk.StringVar(value="")
         self.challenge_team_var = tk.StringVar(value="")
@@ -220,6 +230,42 @@ class PokeRLApp(tk.Tk):
         ttk.Entry(hyper, textvariable=self.hidden_var, width=12).grid(row=row, column=1, sticky="w", **PADDING)
         ttk.Label(hyper, text="Concurrent battles:").grid(row=row, column=2, sticky="e", **PADDING)
         ttk.Spinbox(hyper, textvariable=self.concurrent_battles_var, from_=1, to=64, width=8).grid(row=row, column=3, sticky="w", **PADDING)
+
+        # --- Advanced Features ---
+        adv = ttk.LabelFrame(parent, text="Advanced Features")
+        adv.pack(fill="x", padx=6, pady=4)
+
+        # Row 0: Team sheets + LSTM
+        ttk.Checkbutton(
+            adv, text="Full team sheet obs",
+            variable=self.team_sheet_obs_var,
+        ).grid(row=0, column=0, sticky="w", **PADDING)
+        ttk.Checkbutton(
+            adv, text="LSTM recurrence",
+            variable=self.use_lstm_var,
+        ).grid(row=0, column=1, sticky="w", **PADDING)
+        ttk.Label(adv, text="LSTM hidden:").grid(row=0, column=2, sticky="e", **PADDING)
+        ttk.Entry(adv, textvariable=self.lstm_hidden_var, width=8).grid(row=0, column=3, sticky="w", **PADDING)
+
+        # Row 1: Q-head + search weight
+        ttk.Checkbutton(
+            adv, text="Q-head search",
+            variable=self.q_head_var,
+        ).grid(row=1, column=0, sticky="w", **PADDING)
+        ttk.Label(adv, text="Search weight:").grid(row=1, column=1, sticky="e", **PADDING)
+        ttk.Entry(adv, textvariable=self.search_weight_var, width=8).grid(row=1, column=2, sticky="w", **PADDING)
+
+        # Row 2: RND exploration
+        ttk.Checkbutton(
+            adv, text="RND exploration",
+            variable=self.rnd_var,
+        ).grid(row=2, column=0, sticky="w", **PADDING)
+        ttk.Label(adv, text="RND coef:").grid(row=2, column=1, sticky="e", **PADDING)
+        ttk.Entry(adv, textvariable=self.rnd_coef_var, width=8).grid(row=2, column=2, sticky="w", **PADDING)
+        ttk.Checkbutton(
+            adv, text="Adaptive temp",
+            variable=self.rnd_adaptive_temp_var,
+        ).grid(row=2, column=3, sticky="w", **PADDING)
 
         # --- Controls ---
         ctrl = ttk.Frame(parent)
@@ -771,6 +817,15 @@ class PokeRLApp(tk.Tk):
             checkpoint_dir=self.output_var.get(),
             server_port=self.server_port_var.get(),
             num_parallel_battles=self.concurrent_battles_var.get(),
+            # Advanced features
+            team_sheet_obs=self.team_sheet_obs_var.get(),
+            use_lstm=self.use_lstm_var.get(),
+            lstm_hidden_size=self.lstm_hidden_var.get(),
+            q_head_enabled=self.q_head_var.get(),
+            search_weight=self.search_weight_var.get(),
+            rnd_enabled=self.rnd_var.get(),
+            rnd_coef=self.rnd_coef_var.get(),
+            rnd_adaptive_temp=self.rnd_adaptive_temp_var.get(),
         )
         ckpt = self.checkpoint_var.get().strip()
         if ckpt:
