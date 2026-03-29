@@ -1,8 +1,61 @@
-# Cloud Training Guide
+# Cloud & Headless Training Guide
 
-Run PokeRL training in a Docker container so it keeps going even when your local machine is off.
+Run PokeRL training without the GUI — locally, on a cloud VM, or in Docker.
 
-## Quick Start (Local Docker)
+## Option 1: Launch Scripts (Recommended)
+
+The simplest approach. No Docker needed — just Python, Node.js, and git.
+
+### Windows
+
+```
+start_training.bat
+```
+
+### Linux / macOS / Cloud VM
+
+```bash
+./start_training.sh
+```
+
+These scripts automatically:
+- Clone and build Pokemon Showdown (first run only)
+- Start the Showdown server
+- Launch training with auto-resume from the latest checkpoint
+- Shut down cleanly on Ctrl+C
+
+### Passing Extra Arguments
+
+```bash
+# Windows
+start_training.bat --infinite --total-battles 50000
+
+# Linux/macOS
+./start_training.sh --infinite --total-battles 50000
+```
+
+### Monitoring
+
+```bash
+# Follow the training log (Linux/macOS)
+tail -f logs/training.log
+
+# Windows (PowerShell)
+Get-Content logs\training.log -Wait
+```
+
+### Stopping and Resuming
+
+Press **Ctrl+C** to stop. Just run the script again to resume — it automatically
+loads the latest checkpoint.
+
+---
+
+## Option 2: Docker
+
+If you have Docker available, you can run everything in a container.
+
+### Quick Start
 
 ```bash
 # Build and start training
@@ -14,35 +67,23 @@ docker compose up --build -d
 
 Training automatically resumes from the latest checkpoint on every start.
 
-## Passing Extra Arguments
-
-Any arguments after the image name are forwarded to `train.py`:
+### Passing Extra Arguments
 
 ```bash
-# Train forever
 docker compose run pokerl --infinite
-
-# Train for a specific number of battles
 docker compose run pokerl --total-battles 50000
-
-# Use GPU
 docker compose run pokerl --device cuda
 ```
 
-## Monitoring
+### Monitoring
 
 ```bash
-# Follow the training log
 tail -f logs/training.log
-
-# Check container status
 docker compose ps
-
-# View live container output
 docker compose logs -f
 ```
 
-## File Layout
+### File Layout
 
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
@@ -50,51 +91,53 @@ docker compose logs -f
 | `./logs/` | `/app/logs/` | Training log files |
 | `./teams/` | `/app/teams/` | Team files (editable without rebuild) |
 
-## Stopping and Resuming
+### Stopping and Resuming
 
 ```bash
-# Graceful stop
-docker compose down
-
-# Resume (automatically loads latest checkpoint)
-docker compose up -d
+docker compose down       # stop
+docker compose up -d      # resume
 ```
 
-The container is configured with `restart: unless-stopped`, so it will automatically restart after crashes or Docker daemon restarts.
+The container is configured with `restart: unless-stopped`, so it auto-restarts
+after crashes or Docker daemon restarts.
+
+---
 
 ## Deploying on a Cloud VM
 
 ### 1. Launch a VM
 
-Any cloud provider works (AWS EC2, GCP Compute Engine, DigitalOcean, etc.). Recommended:
-- **CPU training**: 2+ vCPUs, 4+ GB RAM (e.g., AWS `t3.medium`)
-- **GPU training**: Any GPU instance with NVIDIA drivers + Docker
+Any cloud provider works (AWS EC2, GCP Compute Engine, DigitalOcean, etc.):
+- **CPU training**: 2+ vCPUs, 4+ GB RAM (e.g., AWS `t3.medium`, ~$30/month)
+- **GPU training**: Any GPU instance with NVIDIA drivers
 
-### 2. Install Docker
+### 2. Install Dependencies
 
 ```bash
 # Ubuntu/Debian
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-# Log out and back in, then:
-docker compose version  # verify install
-```
+sudo apt update
+sudo apt install -y python3 python3-pip nodejs npm git
 
-### 3. Clone and Start
-
-```bash
+# Clone repo
 git clone <your-repo-url> PokeRL
 cd PokeRL
+pip install -r requirements.txt
+```
 
-# Edit teams if needed
-# vim teams/team1.txt
-# vim teams/team2.txt
+### 3. Start Training in Background
 
-# Build and run in background
-docker compose up --build -d
+Use `screen` or `tmux` so training survives SSH disconnects:
 
-# Check logs
-tail -f logs/training.log
+```bash
+# Start a persistent screen session
+screen -S pokerl
+
+# Launch training
+./start_training.sh --infinite
+
+# Detach: press Ctrl+A, then D
+# Reattach later:
+screen -r pokerl
 ```
 
 ### 4. Download Checkpoints
@@ -104,9 +147,22 @@ tail -f logs/training.log
 scp -r user@vm-ip:~/PokeRL/checkpoints/ ./checkpoints/
 ```
 
+---
+
 ## GPU Support
 
-For GPU training, modify `docker-compose.yml` to add the NVIDIA runtime:
+### Without Docker
+
+```bash
+# Just pass --device cuda
+./start_training.sh --device cuda
+```
+
+Requires PyTorch with CUDA support (`pip install torch --index-url https://download.pytorch.org/whl/cu121`).
+
+### With Docker
+
+Add NVIDIA runtime to `docker-compose.yml`:
 
 ```yaml
 services:
@@ -127,17 +183,15 @@ services:
               capabilities: [gpu]
 ```
 
-Then run with `--device cuda`:
-
-```bash
-docker compose run pokerl --device cuda
-```
+Then: `docker compose run pokerl --device cuda`
 
 Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
+
+---
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SHOWDOWN_PORT` | `8000` | Pokemon Showdown server port (internal) |
-| `LOG_FILE` | `/app/logs/training.log` | Log file path |
+| `SHOWDOWN_PORT` | `8000` | Pokemon Showdown server port |
+| `LOG_FILE` | `logs/training.log` | Log file path |
