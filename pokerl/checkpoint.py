@@ -30,6 +30,17 @@ class CheckpointManager:
         self.checkpoint_dir = Path(config.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    def get_latest_metadata(self) -> Optional[dict]:
+        """Return the metadata dict from the latest checkpoint, or None."""
+        latest_path = self.checkpoint_dir / "latest.pt"
+        if not latest_path.exists():
+            return None
+        try:
+            state = torch.load(latest_path, map_location="cpu", weights_only=False)
+            return state.get("metadata")
+        except Exception:
+            return None
+
     def save(
         self,
         agent1: PPOAgent,

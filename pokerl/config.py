@@ -60,6 +60,13 @@ class Config:
     damage_reward_weight: float = 0.1  # weight for damage differential in terminal reward
     survival_reward_per_turn: float = 0.005  # small per-turn bonus for staying alive
 
+    # --- Matchup-aware reward balancing ---
+    matchup_reward_scaling: bool = True       # enable win-rate-aware reward rescaling
+    reward_wr_ema_alpha: float = 0.01         # EMA smoothing for per-team win rate tracking
+    underdog_shaping_boost: float = 3.0       # max multiplier on KO/damage weights for underdog
+    underdog_wr_threshold: float = 0.3        # WR below which underdog boost activates
+    matchup_conditioned_value: bool = True    # feed team WR EMA to value head as extra input
+
     # --- Evaluation ---
     greedy_eval_interval: int = 1000      # run greedy eval every N battles (0 to disable)
     greedy_eval_battles: int = 50         # number of evaluation battles per eval

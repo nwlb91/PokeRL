@@ -70,6 +70,18 @@ def parse_args():
     parser.add_argument("--survival-reward", type=float, default=0.005,
                         help="Per-turn survival bonus for mid-battle steps")
 
+    # Matchup-aware reward balancing
+    parser.add_argument("--no-matchup-reward-scaling", action="store_true",
+                        help="Disable matchup-aware reward rescaling for underdog teams")
+    parser.add_argument("--reward-wr-ema-alpha", type=float, default=0.01,
+                        help="EMA smoothing for per-team win rate tracking")
+    parser.add_argument("--underdog-shaping-boost", type=float, default=3.0,
+                        help="Max multiplier on KO/damage weights for underdog teams")
+    parser.add_argument("--underdog-wr-threshold", type=float, default=0.3,
+                        help="WR below which underdog shaping boost activates")
+    parser.add_argument("--no-matchup-conditioned-value", action="store_true",
+                        help="Disable matchup-conditioned value head")
+
     # AlphaStar League
     parser.add_argument("--league-size", type=int, default=20)
     parser.add_argument("--checkpoint-interval", type=int, default=50)
@@ -190,6 +202,11 @@ def main():
         ko_reward_weight=args.ko_reward_weight,
         damage_reward_weight=args.damage_reward_weight,
         survival_reward_per_turn=args.survival_reward,
+        matchup_reward_scaling=not args.no_matchup_reward_scaling,
+        reward_wr_ema_alpha=args.reward_wr_ema_alpha,
+        underdog_shaping_boost=args.underdog_shaping_boost,
+        underdog_wr_threshold=args.underdog_wr_threshold,
+        matchup_conditioned_value=not args.no_matchup_conditioned_value,
         best_model_tracking=not args.no_best_model_tracking,
         regression_threshold=args.regression_threshold,
         regression_eval_window=args.regression_eval_window,

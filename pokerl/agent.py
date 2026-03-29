@@ -31,6 +31,7 @@ class RolloutStep:
     value: float
     reward: float
     done: bool
+    matchup_context: Optional[np.ndarray] = None
 
 
 class RolloutBuffer:
@@ -81,12 +82,22 @@ class RolloutBuffer:
         masks = np.stack([s.action_mask for s in self.steps])
         log_probs = np.array([s.log_prob for s in self.steps], dtype=np.float32)
         old_values = np.array([s.value for s in self.steps], dtype=np.float32)
+
+        # Matchup context (None if not used)
+        has_ctx = self.steps[0].matchup_context is not None
+        if has_ctx:
+            ctx = np.stack([s.matchup_context for s in self.steps])
+            ctx_t = torch.from_numpy(ctx).to(device)
+        else:
+            ctx_t = None
+
         return (
             torch.from_numpy(obs).to(device),
             torch.from_numpy(actions).to(device),
             torch.from_numpy(masks).to(device),
             torch.from_numpy(log_probs).to(device),
             torch.from_numpy(old_values).to(device),
+            ctx_t,
         )
 
 
@@ -106,6 +117,7 @@ class PPOAgent:
             num_layers=config.num_layers,
             uncertainty_heads=config.uncertainty_heads,
             uncertainty_weight=config.uncertainty_weight,
+            matchup_context_size=1 if config.matchup_conditioned_value else 0,
         ).to(self.device)
 
         # Team preview network
@@ -202,7 +214,8 @@ class PPOAgent:
                 sched.step()
 
     def select_battle_action(
-        self, obs: np.ndarray, action_mask: np.ndarray, deterministic: bool = False
+        self, obs: np.ndarray, action_mask: np.ndarray, deterministic: bool = False,
+        matchup_context: Optional[np.ndarray] = None,
     ) -> Tuple[int, float, float]:
         """Select a battle action using the policy network.
 
@@ -212,8 +225,13 @@ class PPOAgent:
         with torch.inference_mode():
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
             mask_t = torch.from_numpy(action_mask).unsqueeze(0).to(self.device)
+            ctx_t = None
+            if matchup_context is not None:
+                ctx_t = torch.from_numpy(matchup_context).unsqueeze(0).to(self.device)
 
-            logits, value = self.battle_net(obs_t, mask_t, deterministic=deterministic)
+            logits, value = self.battle_net(
+                obs_t, mask_t, deterministic=deterministic, matchup_context=ctx_t,
+            )
 
             dist = torch.distributions.Categorical(logits=logits)
             if deterministic:
@@ -303,7 +321,7 @@ class PPOAgent:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Pre-convert ALL data to GPU tensors once
-        all_obs, all_actions, all_masks, all_old_lp, all_old_values = buffer.to_tensors(self.device)
+        all_obs, all_actions, all_masks, all_old_lp, all_old_values, all_ctx = buffer.to_tensors(self.device)
         all_returns = torch.from_numpy(returns).to(self.device)
         all_advantages = torch.from_numpy(advantages).to(self.device)
 
@@ -328,9 +346,11 @@ class PPOAgent:
                 old_val_t = all_old_values[idx]
                 returns_t = all_returns[idx]
                 adv_t = all_advantages[idx]
+                ctx_t = all_ctx[idx] if all_ctx is not None else None
 
                 _, new_lp, entropy, values = network.get_action_and_value(
-                    obs_t, masks_t, actions_t, detach_uncertainty=True
+                    obs_t, masks_t, actions_t, detach_uncertainty=True,
+                    matchup_context=ctx_t,
                 )
 
                 # Policy loss (clipped PPO)

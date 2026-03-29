@@ -110,6 +110,10 @@ class Trainer:
         self._baseline_ref_wr1: float = 0.5  # baseline1's WR vs baseline2
         self._baseline_ref_wr2: float = 0.5  # baseline2's WR vs baseline1
 
+        # Per-team EMA win rates for matchup-aware reward scaling
+        self._team1_wr_ema: float = 0.5
+        self._team2_wr_ema: float = 0.5
+
         # Best-model tracking and regression protection
         self.best_eval_win_rate: float = 0.0
         self.regression_counter: int = 0
@@ -480,6 +484,11 @@ class Trainer:
                     self.agent1, self.agent2,
                     self.league, self.wp_estimator,
                 )
+            # Restore per-team EMA win rates from checkpoint metadata
+            meta = self.ckpt_manager.get_latest_metadata()
+            if meta is not None:
+                self._team1_wr_ema = meta.get("team1_wr_ema", 0.5)
+                self._team2_wr_ema = meta.get("team2_wr_ema", 0.5)
             logger.info(f"Resumed from battle {self.battle_count}")
 
     def _fresh_start_from_checkpoint(self):
@@ -772,6 +781,14 @@ class Trainer:
             opponent_player = live_opponent_fn()
             opponent_agent_id = live_agent.agent_id
 
+        # Set matchup context (team WR EMA) for conditioned value head
+        if self.config.matchup_conditioned_value:
+            tp_wr = self._team1_wr_ema if training_team_id == 0 else self._team2_wr_ema
+            training_player.matchup_context = np.array([tp_wr], dtype=np.float32)
+            if not use_league:
+                opp_wr = self._team2_wr_ema if training_team_id == 0 else self._team1_wr_ema
+                opponent_player.matchup_context = np.array([opp_wr], dtype=np.float32)
+
         try:
             await asyncio.wait_for(
                 training_player.battle_against(opponent_player, n_battles=n_battles),
@@ -789,9 +806,6 @@ class Trainer:
                 self._league_opponent_team_id = None
 
         # Process each completed battle individually via per-battle state
-        ko_w = self.config.ko_reward_weight
-        dmg_w = self.config.damage_reward_weight
-
         tp_episodes = training_player.pop_completed_episodes()
         opp_episodes = (
             opponent_player.pop_completed_episodes() if not use_league else []
@@ -801,14 +815,18 @@ class Trainer:
         # pair them with the training player's episodes
         opp_by_tag = {ep.battle_tag: ep for ep in opp_episodes}
 
+        # Per-team EMA win rates for matchup-aware reward scaling
+        tp_wr_ema = self._team1_wr_ema if training_team_id == 0 else self._team2_wr_ema
+        opp_wr_ema = self._team2_wr_ema if training_team_id == 0 else self._team1_wr_ema
+
         for tp_ep in tp_episodes:
             tp_won = tp_ep.won
-            tp_base = 1.0 if tp_won else -1.0
 
-            tp_reward = (
-                tp_base
-                + ko_w * RLPlayer.get_ko_differential(tp_ep)
-                + dmg_w * RLPlayer.get_damage_differential(tp_ep)
+            tp_reward = self._compute_scaled_reward(
+                tp_won,
+                RLPlayer.get_ko_differential(tp_ep),
+                RLPlayer.get_damage_differential(tp_ep),
+                tp_wr_ema,
             )
 
             # Apply reward shaping and finalize for training player
@@ -818,11 +836,11 @@ class Trainer:
             # If fighting the live opponent, also process their data
             opp_ep = opp_by_tag.get(tp_ep.battle_tag)
             if opp_ep is not None:
-                opp_base = -tp_base
-                opp_reward = (
-                    opp_base
-                    + ko_w * RLPlayer.get_ko_differential(opp_ep)
-                    + dmg_w * RLPlayer.get_damage_differential(opp_ep)
+                opp_reward = self._compute_scaled_reward(
+                    not tp_won,
+                    RLPlayer.get_ko_differential(opp_ep),
+                    RLPlayer.get_damage_differential(opp_ep),
+                    opp_wr_ema,
                 )
                 self._apply_reward_shaping(opponent_player, opp_ep)
                 opponent_player.finalize_episode(opp_ep, opp_reward)
@@ -848,8 +866,51 @@ class Trainer:
             else:
                 self.recent_results.append(not tp_won)
 
+            # Update per-team EMA win rates for matchup-aware scaling
+            alpha = self.config.reward_wr_ema_alpha
+            if training_team_id == 0:
+                self._team1_wr_ema += alpha * (float(tp_won) - self._team1_wr_ema)
+                if opp_ep is not None:
+                    self._team2_wr_ema += alpha * (float(not tp_won) - self._team2_wr_ema)
+            else:
+                self._team2_wr_ema += alpha * (float(tp_won) - self._team2_wr_ema)
+                if opp_ep is not None:
+                    self._team1_wr_ema += alpha * (float(not tp_won) - self._team1_wr_ema)
+
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
+
+    def _compute_scaled_reward(
+        self, won: bool, ko_diff: float, dmg_diff: float, team_wr_ema: float
+    ) -> float:
+        """Compute terminal reward with matchup-aware scaling.
+
+        When ``matchup_reward_scaling`` is enabled, the base win/loss reward is
+        scaled by the team's running EMA win rate so that expected losses are
+        dampened and rare wins amplified.  KO/damage weights are also boosted
+        for underdog teams (WR below ``underdog_wr_threshold``).
+        """
+        if self.config.matchup_reward_scaling:
+            wr = max(team_wr_ema, 0.01)  # floor to avoid near-zero issues
+            if won:
+                base = 1.0 + (1.0 - wr)  # rare wins amplified
+            else:
+                base = -wr  # expected losses dampened
+        else:
+            base = 1.0 if won else -1.0
+
+        ko_w = self.config.ko_reward_weight
+        dmg_w = self.config.damage_reward_weight
+
+        # Boost KO/damage weights for underdog teams
+        if (self.config.matchup_reward_scaling
+                and team_wr_ema < self.config.underdog_wr_threshold):
+            t = self.config.underdog_wr_threshold
+            boost = 1.0 + self.config.underdog_shaping_boost * (t - team_wr_ema) / t
+            ko_w *= boost
+            dmg_w *= boost
+
+        return base + ko_w * ko_diff + dmg_w * dmg_diff
 
     def _apply_reward_shaping(self, player: RLPlayer, episode: CompletedEpisode):
         """Apply vectorized win probability reward shaping.
@@ -996,6 +1057,8 @@ class Trainer:
                 ),
                 "baseline_promotions_team1": self._baseline1_promotions,
                 "baseline_promotions_team2": self._baseline2_promotions,
+                "team1_wr_ema": self._team1_wr_ema,
+                "team2_wr_ema": self._team2_wr_ema,
             },
         )
 
@@ -1068,9 +1131,16 @@ class Trainer:
                 **self._latest_metrics,
             })
 
+        # Matchup-aware reward scaling info
+        matchup_str = ""
+        if self.config.matchup_reward_scaling:
+            matchup_str = (
+                f" | WR EMA: T1={self._team1_wr_ema:.3f} T2={self._team2_wr_ema:.3f}"
+            )
+
         logger.info(
             f"Battle {self.battle_count}/{self.config.total_battles} | "
-            f"Team1 recent WR: {wr:.1%}{greedy_str} | "
+            f"Team1 recent WR: {wr:.1%}{greedy_str}{matchup_str} | "
             f"Agent1: {self.agent1.wins}W/{self.agent1.losses}L | "
             f"Agent2: {self.agent2.wins}W/{self.agent2.losses}L | "
             f"League: {len(self.league.agents)} agents"

@@ -100,6 +100,10 @@ class RLPlayer(Player):
         self.collect_data = collect_data
         self.deterministic = deterministic
 
+        # Matchup context set by trainer before each battle batch
+        # (e.g. team WR EMA for matchup-conditioned value head)
+        self.matchup_context: Optional[np.ndarray] = None
+
         # Per-battle state keyed by battle.battle_tag
         self._episode_states: Dict[str, _BattleEpisodeState] = {}
 
@@ -189,11 +193,13 @@ class RLPlayer(Player):
                 value=state.prev_value,
                 reward=0.0,  # will be reshaped later
                 done=False,
+                matchup_context=self.matchup_context,
             )
             state.pending_steps.append(step)
 
         action, log_prob, value = self.agent.select_battle_action(
-            obs, action_mask, deterministic=self.deterministic
+            obs, action_mask, deterministic=self.deterministic,
+            matchup_context=self.matchup_context,
         )
 
         # Store for next step
@@ -251,6 +257,7 @@ class RLPlayer(Player):
                 value=state.prev_value,
                 reward=terminal_reward,
                 done=True,
+                matchup_context=self.matchup_context,
             )
             self.agent.battle_buffer.add(step)
 

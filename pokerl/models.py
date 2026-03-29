@@ -46,10 +46,12 @@ class PolicyValueNet(nn.Module):
 
     def __init__(self, obs_size: int, action_size: int,
                  hidden_size: int = 256, num_layers: int = 3,
-                 uncertainty_heads: int = 1, uncertainty_weight: float = 0.5):
+                 uncertainty_heads: int = 1, uncertainty_weight: float = 0.5,
+                 matchup_context_size: int = 0):
         super().__init__()
         self.num_uncertainty_heads = uncertainty_heads
         self.uncertainty_weight = uncertainty_weight
+        self.matchup_context_size = matchup_context_size
 
         self.backbone = BattleNetwork(obs_size, hidden_size, num_layers)
 
@@ -70,16 +72,20 @@ class PolicyValueNet(nn.Module):
                 ) for _ in range(uncertainty_heads - 1)
             ])
 
-        # Value head
+        # Value head — optionally conditioned on matchup context (e.g. team WR EMA)
+        # so the critic can produce different value estimates for different matchup
+        # difficulties without affecting the policy head.
+        value_input_size = hidden_size + matchup_context_size
         self.value_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Linear(value_input_size, hidden_size // 2),
             nn.ReLU(),
             nn.Linear(hidden_size // 2, 1),
         )
 
     def forward(self, obs: torch.Tensor, action_mask: torch.Tensor,
                 deterministic: bool = False,
-                detach_uncertainty: bool = False):
+                detach_uncertainty: bool = False,
+                matchup_context: torch.Tensor = None):
         """Forward pass.
 
         Args:
@@ -90,6 +96,8 @@ class PolicyValueNet(nn.Module):
                 gradients only flow through the mean logits.  Used during PPO
                 updates to keep importance-sampling ratios consistent while
                 preventing the uncertainty bonus from corrupting policy gradients.
+            matchup_context: optional (batch, matchup_context_size) conditioning
+                vector (e.g. team WR EMA) fed only to the value head.
 
         Returns:
             logits: (batch, action_size) masked log-probabilities
@@ -118,13 +126,19 @@ class PolicyValueNet(nn.Module):
         # Mask illegal actions with large negative value
         logits = logits + (action_mask.log().clamp(min=-1e8))
 
-        value = self.value_head(features)
+        # Value head with optional matchup conditioning
+        if self.matchup_context_size > 0 and matchup_context is not None:
+            value_input = torch.cat([features, matchup_context], dim=-1)
+        else:
+            value_input = features
+        value = self.value_head(value_input)
         return logits, value
 
     def get_action_and_value(self, obs: torch.Tensor, action_mask: torch.Tensor,
                               action: torch.Tensor = None,
                               deterministic: bool = False,
-                              detach_uncertainty: bool = False):
+                              detach_uncertainty: bool = False,
+                              matchup_context: torch.Tensor = None):
         """Sample or evaluate an action.
 
         Args:
@@ -133,6 +147,7 @@ class PolicyValueNet(nn.Module):
             action: optional (batch,) action to evaluate
             deterministic: if True, no uncertainty bonus in logits
             detach_uncertainty: if True, stop gradients through ensemble std
+            matchup_context: optional (batch, matchup_context_size) for value head
 
         Returns:
             action, log_prob, entropy, value
@@ -141,6 +156,7 @@ class PolicyValueNet(nn.Module):
             obs, action_mask,
             deterministic=deterministic,
             detach_uncertainty=detach_uncertainty,
+            matchup_context=matchup_context,
         )
         dist = torch.distributions.Categorical(logits=logits)
 
@@ -240,7 +256,9 @@ class TeamPreviewNet(nn.Module):
     def get_action_and_value(self, obs: torch.Tensor, mask: torch.Tensor,
                               action: torch.Tensor = None,
                               deterministic: bool = False,
-                              detach_uncertainty: bool = False):
+                              detach_uncertainty: bool = False,
+                              matchup_context: torch.Tensor = None):
+        # matchup_context accepted for API compatibility but unused by preview net
         logits, value = self.forward(
             obs, mask,
             deterministic=deterministic,
