@@ -11,7 +11,10 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
+
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 
 from pokerl.agent import PPOAgent
 from pokerl.config import Config

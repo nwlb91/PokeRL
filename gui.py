@@ -22,7 +22,10 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Patch
 
+import numpy as np
 import torch
+
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 
 from poke_env.ps_client.account_configuration import AccountConfiguration
 from poke_env.ps_client.server_configuration import (

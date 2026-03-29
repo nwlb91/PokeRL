@@ -38,6 +38,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+
 from pokerl.agent import PPOAgent
 from pokerl.config import Config
 
