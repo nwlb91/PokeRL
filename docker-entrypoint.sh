@@ -5,7 +5,7 @@ SHOWDOWN_PORT="${SHOWDOWN_PORT:-8000}"
 LOG_FILE="${LOG_FILE:-/app/logs/training.log}"
 
 echo "[entrypoint] Starting Pokemon Showdown on port ${SHOWDOWN_PORT}..."
-node /app/pokemon-showdown/index.js start --no-security --port "${SHOWDOWN_PORT}" &
+node /app/pokemon-showdown/pokemon-showdown start --no-security --skip-build --port="${SHOWDOWN_PORT}" &
 SHOWDOWN_PID=$!
 
 # Wait for Showdown to accept connections

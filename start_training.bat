@@ -14,7 +14,7 @@ set LOG_FILE=%~dp0logs\training.log
 :: ----------------------------------------------------------
 :: Step 1: Clone Pokemon Showdown if not present
 :: ----------------------------------------------------------
-if not exist "%SHOWDOWN_DIR%\index.js" (
+if not exist "%SHOWDOWN_DIR%\pokemon-showdown" (
     if exist "%SHOWDOWN_DIR%" (
         echo [launcher] Incomplete Pokemon Showdown found. Removing and re-cloning...
         rmdir /s /q "%SHOWDOWN_DIR%"
@@ -42,7 +42,7 @@ if not exist "%~dp0logs" mkdir "%~dp0logs"
 :: Step 3: Start Pokemon Showdown in the background
 :: ----------------------------------------------------------
 echo [launcher] Starting Pokemon Showdown on port %SHOWDOWN_PORT%...
-start /b "showdown" node "%SHOWDOWN_DIR%\index.js" start --no-security --port %SHOWDOWN_PORT%
+start /b "showdown" node "%SHOWDOWN_DIR%\pokemon-showdown" start --no-security --skip-build --port=%SHOWDOWN_PORT%
 
 :: Wait for Showdown to be ready
 echo [launcher] Waiting for Showdown to be ready...

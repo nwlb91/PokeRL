@@ -15,7 +15,7 @@ LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/logs/training.log}"
 # ----------------------------------------------------------
 # Step 1: Clone Pokemon Showdown if not present
 # ----------------------------------------------------------
-if [ ! -f "${SHOWDOWN_DIR}/index.js" ]; then
+if [ ! -f "${SHOWDOWN_DIR}/pokemon-showdown" ]; then
     if [ -d "${SHOWDOWN_DIR}" ]; then
         echo "[launcher] Incomplete Pokemon Showdown found. Removing and re-cloning..."
         rm -rf "${SHOWDOWN_DIR}"
@@ -38,7 +38,7 @@ mkdir -p "${SCRIPT_DIR}/logs"
 # Step 3: Start Pokemon Showdown in the background
 # ----------------------------------------------------------
 echo "[launcher] Starting Pokemon Showdown on port ${SHOWDOWN_PORT}..."
-node "${SHOWDOWN_DIR}/index.js" start --no-security --port "${SHOWDOWN_PORT}" &
+node "${SHOWDOWN_DIR}/pokemon-showdown" start --no-security --skip-build --port="${SHOWDOWN_PORT}" &
 SHOWDOWN_PID=$!
 
 # Wait for Showdown to be ready
