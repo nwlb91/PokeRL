@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--rollout-steps", type=int, default=256)
-    parser.add_argument("--num-parallel-battles", type=int, default=4,
+    parser.add_argument("--num-parallel-battles", type=int, default=16,
                         help="Concurrent battles via poke-env (default: 4)")
 
     # PPO

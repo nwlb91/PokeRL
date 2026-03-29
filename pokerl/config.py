@@ -106,26 +106,26 @@ class Config:
     uncertainty_weight: float = 0.5      # logit bonus scaling for per-action uncertainty
 
     # --- Team sheet observation ---
-    team_sheet_obs: bool = False         # encode full movesets for all bench pokemon
+    team_sheet_obs: bool = True          # encode full movesets for all bench pokemon
 
     # --- LSTM recurrence ---
-    use_lstm: bool = False               # add LSTM between backbone and heads
+    use_lstm: bool = True                # add LSTM between backbone and heads
     lstm_hidden_size: int = 256          # LSTM hidden state dimension
 
     # --- Q-head search ---
-    q_head_enabled: bool = False         # add Q-value head for action reranking
+    q_head_enabled: bool = True          # add Q-value head for action reranking
     search_weight: float = 1.0           # weight of Q-values relative to policy logits
     q_value_coef: float = 0.25           # Q-head loss coefficient during training
 
     # --- Training ---
     total_battles: int = 100000
     infinite_training: bool = False       # ignore total_battles, train forever
-    num_parallel_battles: int = 4
+    num_parallel_battles: int = 16
     battle_timeout: float = 300.0  # seconds; timeout per battle_against call
     device: str = "cpu"
 
     # --- RND state-space exploration ---
-    rnd_enabled: bool = False              # master toggle (off by default for backward compat)
+    rnd_enabled: bool = True               # master toggle for RND state-space exploration
     rnd_coef: float = 0.1                  # intrinsic reward coefficient
     rnd_coef_end: float = 0.01             # final coefficient after annealing
     rnd_anneal_battles: int = 50000        # battles over which to anneal rnd_coef (0 = no anneal)

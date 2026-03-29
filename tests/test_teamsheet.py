@@ -88,9 +88,9 @@ class TestExtendedObsSize:
 
 
 class TestConfigTeamSheet:
-    def test_team_sheet_obs_default_off(self):
+    def test_team_sheet_obs_default_on(self):
         config = Config()
-        assert not config.team_sheet_obs
+        assert config.team_sheet_obs
 
     def test_team_sheet_obs_enabled(self):
         config = Config(team_sheet_obs=True)

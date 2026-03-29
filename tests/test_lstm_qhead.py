@@ -154,13 +154,13 @@ class TestPolicyValueNetQHead:
 class TestLSTMConfig:
     """Tests for LSTM and Q-head configuration."""
 
-    def test_lstm_disabled_by_default(self):
+    def test_lstm_enabled_by_default(self):
         config = Config()
-        assert not config.use_lstm
+        assert config.use_lstm
 
-    def test_q_head_disabled_by_default(self):
+    def test_q_head_enabled_by_default(self):
         config = Config()
-        assert not config.q_head_enabled
+        assert config.q_head_enabled
 
     def test_lstm_enabled(self):
         config = Config(use_lstm=True)

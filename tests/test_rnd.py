@@ -95,7 +95,7 @@ class TestRNDExploration:
 
     @pytest.fixture
     def rnd(self):
-        config = Config(rnd_enabled=True, device="cpu")
+        config = Config(rnd_enabled=True, team_sheet_obs=False, device="cpu")
         return RNDExploration(config)
 
     @pytest.fixture
@@ -137,7 +137,7 @@ class TestRNDExploration:
 
         # The mean raw error after training should be lower than a fresh
         # predictor would produce
-        fresh_config = Config(rnd_enabled=True, device="cpu")
+        fresh_config = Config(rnd_enabled=True, team_sheet_obs=False, device="cpu")
         fresh_rnd = RNDExploration(fresh_config)
         with torch.no_grad():
             fresh_pred = fresh_rnd.predictor(obs_t)
@@ -202,7 +202,7 @@ class TestRNDExploration:
         state = rnd.state_dict()
 
         # Create fresh instance and load
-        config = Config(rnd_enabled=True, device="cpu")
+        config = Config(rnd_enabled=True, team_sheet_obs=False, device="cpu")
         rnd2 = RNDExploration(config)
         rnd2.load_state_dict(state)
 
@@ -221,9 +221,9 @@ class TestRNDExploration:
 class TestRNDConfig:
     """Tests for RND configuration validation."""
 
-    def test_rnd_disabled_by_default(self):
+    def test_rnd_enabled_by_default(self):
         config = Config()
-        assert not config.rnd_enabled
+        assert config.rnd_enabled
 
     def test_rnd_enabled(self):
         config = Config(rnd_enabled=True)
