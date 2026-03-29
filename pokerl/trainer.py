@@ -215,6 +215,7 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
+            self._setup_player(self._eval_player1, team_id=0)
         return self._eval_player1
 
     def _get_or_create_eval_player2(self) -> RLPlayer:
@@ -229,6 +230,7 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
+            self._setup_player(self._eval_player2, team_id=1)
         return self._eval_player2
 
     async def _async_close_player(self, player: "Optional[RLPlayer]") -> None:
@@ -306,6 +308,7 @@ class Trainer:
             max_concurrent=self._n_concurrent,
             server_configuration=self.server_config,
         )
+        self._setup_player(self._league_opponent_player, team_id=team_id)
 
         self._league_opponent_id = league_agent.agent_id
         self._league_opponent_team_id = team_id
@@ -398,6 +401,7 @@ class Trainer:
             max_concurrent=1,
             server_configuration=self.server_config,
         )
+        self._setup_player(self._baseline_player1, team_id=0)
 
         self._baseline_agent2 = PPOAgent(self.config, agent_id="baseline_team2")
         self._baseline_agent2.load_weights_only(self.agent2.get_state_dict())
@@ -411,6 +415,7 @@ class Trainer:
             max_concurrent=1,
             server_configuration=self.server_config,
         )
+        self._setup_player(self._baseline_player2, team_id=1)
         logger.info("Per-team baseline agents frozen for absolute skill evaluation")
 
         # Save initial best snapshots so both best_team*.pt files exist from
