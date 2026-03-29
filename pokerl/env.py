@@ -34,7 +34,7 @@ from pokerl.actions import (
 )
 from pokerl.agent import PPOAgent, RolloutStep
 from pokerl.config import Config
-from pokerl.features import embed_battle, embed_team_preview
+from pokerl.features import embed_battle, embed_team_preview, BATTLE_OBS_SIZE_EXTENDED
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ class _BattleEpisodeState:
     opp_total_hp_lost: float = 0.0
     prev_own_hp: Optional[float] = None
     prev_opp_hp: Optional[float] = None
+    lstm_hidden: Optional[tuple] = None  # (h, c) LSTM hidden state
 
 
 @dataclass
@@ -107,6 +108,10 @@ class RLPlayer(Player):
         # RND exploration module (set by trainer when rnd_enabled)
         self.rnd = None
 
+        # Pre-parsed team move data for extended observations (set by trainer)
+        self.our_team_moves = None   # List[List[Move]] or None
+        self.opp_team_moves = None   # List[List[Move]] or None
+
         # Per-battle state keyed by battle.battle_tag
         self._episode_states: Dict[str, _BattleEpisodeState] = {}
 
@@ -140,7 +145,7 @@ class RLPlayer(Player):
 
     def teampreview(self, battle: Battle) -> str:
         """Select a lead using the team preview network."""
-        obs = embed_team_preview(battle)
+        obs = embed_team_preview(battle, self.our_team_moves, self.opp_team_moves)
         mask = get_team_preview_mask(battle)
 
         action, log_prob, value = self.agent.select_preview_action(
@@ -160,7 +165,7 @@ class RLPlayer(Player):
 
     def choose_move(self, battle: Battle) -> BattleOrder:
         """Select a battle action using the policy network."""
-        obs = embed_battle(battle)
+        obs = embed_battle(battle, self.our_team_moves, self.opp_team_moves)
         action_mask = get_action_mask(battle, self.config)
 
         # Store observation for win probability training
@@ -207,11 +212,25 @@ class RLPlayer(Player):
                 and not self.deterministic):
             temperature = self.rnd.compute_novelty_temperature(obs)
 
-        action, log_prob, value = self.agent.select_battle_action(
+        # Get LSTM hidden state for recurrent models
+        hidden_state = None
+        if self.agent.use_lstm and self.collect_data:
+            es = self._get_episode_state(battle)
+            hidden_state = es.lstm_hidden
+
+        result = self.agent.select_battle_action(
             obs, action_mask, deterministic=self.deterministic,
             matchup_context=self.matchup_context,
             temperature=temperature,
+            hidden_state=hidden_state,
         )
+
+        # Unpack result — LSTM returns 4 values, otherwise 3
+        if self.agent.use_lstm:
+            action, log_prob, value, new_hidden = result
+        else:
+            action, log_prob, value = result
+            new_hidden = None
 
         # Store for next step
         if self.collect_data:
@@ -221,6 +240,8 @@ class RLPlayer(Player):
             state.prev_action_mask = action_mask
             state.prev_log_prob = log_prob
             state.prev_value = value
+            if new_hidden is not None:
+                state.lstm_hidden = new_hidden
 
         order = action_to_order(action, battle, self.config)
         return order

@@ -152,26 +152,76 @@ def _encode_team_pokemon_into(buf: np.ndarray, offset: int,
         buf[o] = float(mon.fainted); o += 1
 
 
-def embed_battle(battle: Battle) -> np.ndarray:
+TEAM_POKEMON_EXTENDED_SIZE = 203  # 55 base + 4 * 37 moves
+
+def _encode_team_pokemon_extended_into(
+    buf: np.ndarray, offset: int,
+    team: Dict[str, Pokemon],
+    team_moves: Optional[List[List]] = None,
+    max_size: int = 6,
+):
+    """Encode up to max_size Pokemon with full movesets (203 dims each).
+
+    Args:
+        buf: Output buffer.
+        offset: Write position in buf.
+        team: Pokemon dict from battle.team or battle.opponent_team.
+        team_moves: Pre-parsed list of Move objects per pokemon (from team sheet).
+            Index i corresponds to team slot i. If None, uses pokemon.moves.
+        max_size: Max pokemon to encode.
+    """
+    per_mon = TEAM_POKEMON_EXTENDED_SIZE
+    for i, mon in enumerate(team.values()):
+        if i >= max_size:
+            break
+        o = offset + i * per_mon
+
+        # Base encoding (55 dims)
+        buf[o] = mon.current_hp_fraction; o += 1
+        _encode_type_into(buf, o, mon.type_1); o += NUM_TYPES
+        _encode_type_into(buf, o, mon.type_2); o += NUM_TYPES
+        _encode_status_into(buf, o, mon.status); o += NUM_STATUSES
+        base = mon.base_stats
+        for s in STAT_NAMES:
+            buf[o] = base.get(s, 0) / 255.0
+            o += 1
+        buf[o] = float(mon.fainted); o += 1
+
+        # Move encoding (4 * 37 = 148 dims)
+        if team_moves is not None and i < len(team_moves):
+            moves = team_moves[i]
+        else:
+            moves = list(mon.moves.values())
+        for j in range(4):
+            move = moves[j] if j < len(moves) else None
+            _encode_move_into(buf, o, move, mon)
+            o += 37
+
+
+def embed_battle(
+    battle: Battle,
+    our_team_moves: Optional[List[List]] = None,
+    opp_team_moves: Optional[List[List]] = None,
+) -> np.ndarray:
     """Convert a battle state into a comprehensive feature vector.
 
-    Feature breakdown:
-      - Active Pokemon: 69
-      - Active Pokemon moves (4 moves): 4 * 37 = 148
-      - Bench Pokemon (6 slots): 6 * 55 = 330
-      - Opponent active Pokemon: 69
-      - Opponent known team (6 slots): 6 * 55 = 330
-      - Weather: 9
-      - Fields: 15
-      - Our side conditions: 24
-      - Opponent side conditions: 24
-      - Battle flags: 14
-      Total: 1032
+    When team_moves are provided (team_sheet_obs mode), bench pokemon are
+    encoded with their full movesets (203 dims each) instead of the base
+    55 dims, expanding the observation from 1032 to 2808.
+
+    Args:
+        battle: The current battle state.
+        our_team_moves: Pre-parsed Move objects for our team (from team sheet).
+        opp_team_moves: Pre-parsed Move objects for opponent team (from team sheet).
 
     Returns:
-        np.ndarray of shape (1032,)
+        np.ndarray of shape (BATTLE_OBS_SIZE,) or (BATTLE_OBS_SIZE_EXTENDED,)
     """
-    buf = np.zeros(BATTLE_OBS_SIZE, dtype=np.float32)
+    extended = our_team_moves is not None or opp_team_moves is not None
+    obs_size = BATTLE_OBS_SIZE_EXTENDED if extended else BATTLE_OBS_SIZE
+    team_size = TEAM_POKEMON_EXTENDED_SIZE * 6 if extended else 330
+
+    buf = np.zeros(obs_size, dtype=np.float32)
     o = 0
 
     # Active Pokemon (69)
@@ -189,17 +239,23 @@ def embed_battle(battle: Battle) -> np.ndarray:
         _encode_move_into(buf, o, move, active)
         o += 37
 
-    # Full team bench (6 * 55 = 330)
-    _encode_team_pokemon_into(buf, o, battle.team)
-    o += 330
+    # Full team (6 slots) — extended or base encoding
+    if extended:
+        _encode_team_pokemon_extended_into(buf, o, battle.team, our_team_moves)
+    else:
+        _encode_team_pokemon_into(buf, o, battle.team)
+    o += team_size
 
     # Opponent active (69)
     _encode_pokemon_base_into(buf, o, battle.opponent_active_pokemon)
     o += 69
 
-    # Opponent team (6 * 55 = 330)
-    _encode_team_pokemon_into(buf, o, battle.opponent_team)
-    o += 330
+    # Opponent team (6 slots) — extended or base encoding
+    if extended:
+        _encode_team_pokemon_extended_into(buf, o, battle.opponent_team, opp_team_moves)
+    else:
+        _encode_team_pokemon_into(buf, o, battle.opponent_team)
+    o += team_size
 
     # Weather (9)
     for w in battle.weather:
@@ -257,22 +313,36 @@ def embed_battle(battle: Battle) -> np.ndarray:
     return buf
 
 
-def embed_team_preview(battle: Battle) -> np.ndarray:
+def embed_team_preview(
+    battle: Battle,
+    our_team_moves: Optional[List[List]] = None,
+    opp_team_moves: Optional[List[List]] = None,
+) -> np.ndarray:
     """Encode battle state during team preview for lead selection.
 
-    Features:
-      - Our team (6 Pokemon): 6 * 55 = 330
-      - Opponent team (6 Pokemon): 6 * 55 = 330
-      - Format flags: 4 (gen number one-hot isn't needed, just num_gimmicks/4)
-      Total: 664
+    Args:
+        battle: The current battle state.
+        our_team_moves: Pre-parsed Move objects for our team (from team sheet).
+        opp_team_moves: Pre-parsed Move objects for opponent team (from team sheet).
 
     Returns:
-        np.ndarray of shape (664,)
+        np.ndarray of shape (TEAM_PREVIEW_OBS_SIZE,) or
+        (TEAM_PREVIEW_OBS_SIZE_EXTENDED,)
     """
-    buf = np.zeros(TEAM_PREVIEW_OBS_SIZE, dtype=np.float32)
-    _encode_team_pokemon_into(buf, 0, battle.team)
-    _encode_team_pokemon_into(buf, 330, battle.opponent_team)
-    buf[660] = battle.gen / 9.0
+    extended = our_team_moves is not None or opp_team_moves is not None
+    obs_size = TEAM_PREVIEW_OBS_SIZE_EXTENDED if extended else TEAM_PREVIEW_OBS_SIZE
+    team_block = TEAM_POKEMON_EXTENDED_SIZE * 6 if extended else 330
+
+    buf = np.zeros(obs_size, dtype=np.float32)
+
+    if extended:
+        _encode_team_pokemon_extended_into(buf, 0, battle.team, our_team_moves)
+        _encode_team_pokemon_extended_into(buf, team_block, battle.opponent_team, opp_team_moves)
+    else:
+        _encode_team_pokemon_into(buf, 0, battle.team)
+        _encode_team_pokemon_into(buf, team_block, battle.opponent_team)
+
+    buf[2 * team_block] = battle.gen / 9.0
 
     if not np.isfinite(buf).all():
         logger.warning("Non-finite values in team preview observation, replacing with zeros")
@@ -283,7 +353,9 @@ def embed_team_preview(battle: Battle) -> np.ndarray:
 
 # Precompute sizes
 BATTLE_OBS_SIZE = 1032
+BATTLE_OBS_SIZE_EXTENDED = 69 + 148 + (203 * 6) + 69 + (203 * 6) + 9 + 15 + 24 + 24 + 14  # 2808
 TEAM_PREVIEW_OBS_SIZE = 664  # 330 our team + 330 opp team + 1 gen + 3 reserved
+TEAM_PREVIEW_OBS_SIZE_EXTENDED = (203 * 6) + (203 * 6) + 4  # 2440
 
 # Runtime checks: ensure hardcoded constants cover all enum values.
 # If poke-env adds new types/statuses/etc., these will catch the mismatch.

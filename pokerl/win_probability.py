@@ -21,7 +21,7 @@ import torch.optim as optim
 
 from pokerl.config import Config
 from pokerl.models import WinProbabilityNet
-from pokerl.features import BATTLE_OBS_SIZE
+from pokerl.features import BATTLE_OBS_SIZE, BATTLE_OBS_SIZE_EXTENDED
 
 
 class WinProbabilityEstimator:
@@ -31,8 +31,9 @@ class WinProbabilityEstimator:
         self.config = config
         self.device = torch.device(config.device)
 
+        obs_size = BATTLE_OBS_SIZE_EXTENDED if config.team_sheet_obs else BATTLE_OBS_SIZE
         self.net = WinProbabilityNet(
-            obs_size=BATTLE_OBS_SIZE,
+            obs_size=obs_size,
             hidden_size=config.wp_hidden_size,
         ).to(self.device)
 

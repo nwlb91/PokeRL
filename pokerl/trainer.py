@@ -32,6 +32,7 @@ from pokerl.league import League
 from pokerl.plateau import PlateauDetector, PlateauInfo
 from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
 from pokerl.rnd import RNDExploration
+from pokerl.teamsheet import parse_team
 from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,19 @@ class Trainer:
         # Load teams
         self.team1_str = load_team(config.team1_path)
         self.team2_str = load_team(config.team2_path)
+
+        # Parse team sheets for extended observations
+        self._team1_moves = None
+        self._team2_moves = None
+        if config.team_sheet_obs:
+            parsed1 = parse_team(self.team1_str)
+            parsed2 = parse_team(self.team2_str)
+            self._team1_moves = parsed1.get_move_objects(config.gen)
+            self._team2_moves = parsed2.get_move_objects(config.gen)
+            logger.info(
+                "Team sheet observation enabled: team1=%d mons, team2=%d mons",
+                len(parsed1.pokemon), len(parsed2.pokemon),
+            )
 
         # Create agents
         self.agent1 = PPOAgent(config, agent_id="team1_main")
@@ -149,6 +163,18 @@ class Trainer:
 
         self._n_concurrent = config.num_parallel_battles
 
+    def _setup_player(self, player: RLPlayer, team_id: int):
+        """Attach shared resources (RND, team sheets) to a player."""
+        if self.rnd is not None:
+            player.rnd = self.rnd
+        if self._team1_moves is not None:
+            if team_id == 0:
+                player.our_team_moves = self._team1_moves
+                player.opp_team_moves = self._team2_moves
+            else:
+                player.our_team_moves = self._team2_moves
+                player.opp_team_moves = self._team1_moves
+
     def _get_or_create_player1(self) -> RLPlayer:
         """Reuse persistent player1 or create a new one."""
         if self._player1 is None:
@@ -160,8 +186,7 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
-            if self.rnd is not None:
-                self._player1.rnd = self.rnd
+            self._setup_player(self._player1, team_id=0)
         return self._player1
 
     def _get_or_create_player2(self) -> RLPlayer:
@@ -175,8 +200,7 @@ class Trainer:
                 max_concurrent=self._n_concurrent,
                 server_configuration=self.server_config,
             )
-            if self.rnd is not None:
-                self._player2.rnd = self.rnd
+            self._setup_player(self._player2, team_id=1)
         return self._player2
 
     def _get_or_create_eval_player1(self) -> RLPlayer:

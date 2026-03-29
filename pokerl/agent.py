@@ -18,8 +18,11 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 from pokerl.config import Config
-from pokerl.models import PolicyValueNet, TeamPreviewNet
-from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
+from pokerl.models import PolicyValueNet, RecurrentPolicyValueNet, TeamPreviewNet
+from pokerl.features import (
+    BATTLE_OBS_SIZE, BATTLE_OBS_SIZE_EXTENDED,
+    TEAM_PREVIEW_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE_EXTENDED,
+)
 
 
 @dataclass
@@ -109,20 +112,30 @@ class PPOAgent:
         self.agent_id = agent_id
         self.device = torch.device(config.device)
 
-        # Battle policy network
-        self.battle_net = PolicyValueNet(
-            obs_size=BATTLE_OBS_SIZE,
+        # Determine observation sizes
+        battle_obs_size = BATTLE_OBS_SIZE_EXTENDED if config.team_sheet_obs else BATTLE_OBS_SIZE
+        preview_obs_size = TEAM_PREVIEW_OBS_SIZE_EXTENDED if config.team_sheet_obs else TEAM_PREVIEW_OBS_SIZE
+
+        # Battle policy network — recurrent or feedforward
+        net_cls = RecurrentPolicyValueNet if config.use_lstm else PolicyValueNet
+        net_kwargs = dict(
+            obs_size=battle_obs_size,
             action_size=config.action_size,
             hidden_size=config.hidden_size,
             num_layers=config.num_layers,
             uncertainty_heads=config.uncertainty_heads,
             uncertainty_weight=config.uncertainty_weight,
             matchup_context_size=1 if config.matchup_conditioned_value else 0,
-        ).to(self.device)
+            q_head_enabled=config.q_head_enabled,
+        )
+        if config.use_lstm:
+            net_kwargs["lstm_hidden_size"] = config.lstm_hidden_size
+        self.battle_net = net_cls(**net_kwargs).to(self.device)
+        self.use_lstm = config.use_lstm
 
-        # Team preview network
+        # Team preview network (always feedforward — one decision per battle)
         self.preview_net = TeamPreviewNet(
-            obs_size=TEAM_PREVIEW_OBS_SIZE,
+            obs_size=preview_obs_size,
             hidden_size=config.hidden_size // 2,
             num_leads=config.team_preview_action_size,
             uncertainty_heads=config.uncertainty_heads,
@@ -217,7 +230,8 @@ class PPOAgent:
         self, obs: np.ndarray, action_mask: np.ndarray, deterministic: bool = False,
         matchup_context: Optional[np.ndarray] = None,
         temperature: float = 1.0,
-    ) -> Tuple[int, float, float]:
+        hidden_state=None,
+    ):
         """Select a battle action using the policy network.
 
         Args:
@@ -225,12 +239,12 @@ class PPOAgent:
             action_mask: Binary mask of legal actions.
             deterministic: If True, select the greedy action.
             matchup_context: Optional matchup conditioning for value head.
-            temperature: Logit temperature for exploration.  Values > 1
-                produce a more uniform (exploratory) distribution; values < 1
-                produce a more peaked (exploitative) distribution.
+            temperature: Logit temperature for exploration.
+            hidden_state: LSTM hidden state tuple (h, c) or None.
 
         Returns:
-            (action, log_prob, value)
+            (action, log_prob, value, new_hidden_state) if LSTM enabled
+            (action, log_prob, value) otherwise
         """
         with torch.inference_mode():
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
@@ -239,9 +253,20 @@ class PPOAgent:
             if matchup_context is not None:
                 ctx_t = torch.from_numpy(matchup_context).unsqueeze(0).to(self.device)
 
-            logits, value = self.battle_net(
-                obs_t, mask_t, deterministic=deterministic, matchup_context=ctx_t,
-            )
+            if self.use_lstm:
+                logits, value, q_values, new_hidden = self.battle_net(
+                    obs_t, mask_t, hidden_state=hidden_state,
+                    deterministic=deterministic, matchup_context=ctx_t,
+                )
+            else:
+                logits, value, q_values = self.battle_net(
+                    obs_t, mask_t, deterministic=deterministic, matchup_context=ctx_t,
+                )
+                new_hidden = None
+
+            # Blend policy logits with Q-values for search
+            if q_values is not None and not deterministic:
+                logits = logits + self.config.search_weight * q_values
 
             # Apply temperature scaling for novelty-driven exploration
             if temperature != 1.0 and not deterministic:
@@ -254,6 +279,8 @@ class PPOAgent:
                 action = dist.sample()
             log_prob = dist.log_prob(action)
 
+        if self.use_lstm:
+            return (action.item(), log_prob.item(), value.squeeze().item(), new_hidden)
         return (action.item(), log_prob.item(), value.squeeze().item())
 
     def select_preview_action(
@@ -362,10 +389,16 @@ class PPOAgent:
                 adv_t = all_advantages[idx]
                 ctx_t = all_ctx[idx] if all_ctx is not None else None
 
-                _, new_lp, entropy, values = network.get_action_and_value(
+                result = network.get_action_and_value(
                     obs_t, masks_t, actions_t, detach_uncertainty=True,
                     matchup_context=ctx_t,
                 )
+                # Unpack — Q-head returns 5 values, otherwise 4
+                if len(result) == 5:
+                    _, new_lp, entropy, values, q_values = result
+                else:
+                    _, new_lp, entropy, values = result
+                    q_values = None
 
                 # Policy loss (clipped PPO)
                 ratio = torch.exp(new_lp - old_lp_t)
@@ -384,11 +417,18 @@ class PPOAgent:
                 # Entropy bonus
                 entropy_loss = -entropy.mean()
 
+                # Q-head loss: learn Q(s, a) ≈ return for the taken action
+                q_loss = torch.tensor(0.0, device=self.device)
+                if q_values is not None:
+                    q_taken = q_values.gather(1, actions_t.unsqueeze(1)).squeeze(1)
+                    q_loss = ((q_taken - returns_t) ** 2).mean()
+
                 # Total loss
                 ent_coef = entropy_coef_override if entropy_coef_override is not None else cfg.entropy_coef
                 loss = (policy_loss
                         + cfg.value_coef * value_loss
-                        + ent_coef * entropy_loss)
+                        + ent_coef * entropy_loss
+                        + cfg.q_value_coef * q_loss)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()

@@ -105,6 +105,18 @@ class Config:
     uncertainty_heads: int = 3           # ensemble policy heads (1 = disabled, >1 = enabled)
     uncertainty_weight: float = 0.5      # logit bonus scaling for per-action uncertainty
 
+    # --- Team sheet observation ---
+    team_sheet_obs: bool = False         # encode full movesets for all bench pokemon
+
+    # --- LSTM recurrence ---
+    use_lstm: bool = False               # add LSTM between backbone and heads
+    lstm_hidden_size: int = 256          # LSTM hidden state dimension
+
+    # --- Q-head search ---
+    q_head_enabled: bool = False         # add Q-value head for action reranking
+    search_weight: float = 1.0           # weight of Q-values relative to policy logits
+    q_value_coef: float = 0.25           # Q-head loss coefficient during training
+
     # --- Training ---
     total_battles: int = 100000
     infinite_training: bool = False       # ignore total_battles, train forever

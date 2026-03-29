@@ -47,11 +47,14 @@ class PolicyValueNet(nn.Module):
     def __init__(self, obs_size: int, action_size: int,
                  hidden_size: int = 256, num_layers: int = 3,
                  uncertainty_heads: int = 1, uncertainty_weight: float = 0.5,
-                 matchup_context_size: int = 0):
+                 matchup_context_size: int = 0,
+                 q_head_enabled: bool = False):
         super().__init__()
         self.num_uncertainty_heads = uncertainty_heads
         self.uncertainty_weight = uncertainty_weight
         self.matchup_context_size = matchup_context_size
+        self.q_head_enabled = q_head_enabled
+        self.action_size = action_size
 
         self.backbone = BattleNetwork(obs_size, hidden_size, num_layers)
 
@@ -81,6 +84,15 @@ class PolicyValueNet(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_size // 2, 1),
         )
+
+        # Optional Q-value head for action reranking (search)
+        self.q_head = None
+        if q_head_enabled:
+            self.q_head = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_size // 2, action_size),
+            )
 
     def forward(self, obs: torch.Tensor, action_mask: torch.Tensor,
                 deterministic: bool = False,
@@ -140,7 +152,13 @@ class PolicyValueNet(nn.Module):
         else:
             value_input = features
         value = self.value_head(value_input)
-        return logits, value
+
+        q_values = None
+        if self.q_head is not None:
+            q_values = self.q_head(features)
+            q_values = q_values + (action_mask.log().clamp(min=-1e8))
+
+        return logits, value, q_values
 
     def get_action_and_value(self, obs: torch.Tensor, action_mask: torch.Tensor,
                               action: torch.Tensor = None,
@@ -158,9 +176,9 @@ class PolicyValueNet(nn.Module):
             matchup_context: optional (batch, matchup_context_size) for value head
 
         Returns:
-            action, log_prob, entropy, value
+            action, log_prob, entropy, value[, q_values]
         """
-        logits, value = self.forward(
+        logits, value, q_values = self.forward(
             obs, action_mask,
             deterministic=deterministic,
             detach_uncertainty=detach_uncertainty,
@@ -174,6 +192,8 @@ class PolicyValueNet(nn.Module):
         log_prob = dist.log_prob(action)
         entropy = dist.entropy()
 
+        if q_values is not None:
+            return action, log_prob, entropy, value.squeeze(-1), q_values
         return action, log_prob, entropy, value.squeeze(-1)
 
     def mean_ensemble_uncertainty(self, obs: torch.Tensor,
@@ -192,6 +212,241 @@ class PolicyValueNet(nn.Module):
                 dim=0,
             )
             # Only measure uncertainty over legal actions
+            legal = action_mask > 0
+            std = all_logits.std(dim=0)
+            if legal.any():
+                return std[legal].mean().item()
+            return std.mean().item()
+
+
+class RecurrentPolicyValueNet(nn.Module):
+    """Actor-critic with LSTM for sequential reasoning across battle turns.
+
+    Architecture: obs → MLP backbone → LSTM → policy/value/Q heads.
+    The LSTM hidden state accumulates information across turns within a
+    battle, enabling the model to track move usage patterns, infer
+    opponent strategies, and remember damage rolls.
+    """
+
+    def __init__(self, obs_size: int, action_size: int,
+                 hidden_size: int = 256, num_layers: int = 3,
+                 lstm_hidden_size: int = 256,
+                 uncertainty_heads: int = 1, uncertainty_weight: float = 0.5,
+                 matchup_context_size: int = 0,
+                 q_head_enabled: bool = False):
+        super().__init__()
+        self.num_uncertainty_heads = uncertainty_heads
+        self.uncertainty_weight = uncertainty_weight
+        self.matchup_context_size = matchup_context_size
+        self.q_head_enabled = q_head_enabled
+        self.action_size = action_size
+        self.lstm_hidden_size = lstm_hidden_size
+
+        self.backbone = BattleNetwork(obs_size, hidden_size, num_layers)
+        self.lstm = nn.LSTM(hidden_size, lstm_hidden_size, batch_first=True)
+
+        # Policy head reads from LSTM output
+        self.policy_head = nn.Sequential(
+            nn.Linear(lstm_hidden_size, lstm_hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(lstm_hidden_size // 2, action_size),
+        )
+
+        if uncertainty_heads > 1:
+            self.ensemble_heads = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(lstm_hidden_size, lstm_hidden_size // 2),
+                    nn.ReLU(),
+                    nn.Linear(lstm_hidden_size // 2, action_size),
+                ) for _ in range(uncertainty_heads - 1)
+            ])
+
+        value_input_size = lstm_hidden_size + matchup_context_size
+        self.value_head = nn.Sequential(
+            nn.Linear(value_input_size, lstm_hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(lstm_hidden_size // 2, 1),
+        )
+
+        self.q_head = None
+        if q_head_enabled:
+            self.q_head = nn.Sequential(
+                nn.Linear(lstm_hidden_size, lstm_hidden_size // 2),
+                nn.ReLU(),
+                nn.Linear(lstm_hidden_size // 2, action_size),
+            )
+
+    def initial_hidden(self, batch_size: int = 1, device=None):
+        """Create zero-initialized LSTM hidden state."""
+        if device is None:
+            device = next(self.parameters()).device
+        h = torch.zeros(1, batch_size, self.lstm_hidden_size, device=device)
+        c = torch.zeros(1, batch_size, self.lstm_hidden_size, device=device)
+        return (h, c)
+
+    def forward(self, obs: torch.Tensor, action_mask: torch.Tensor,
+                hidden_state=None,
+                deterministic: bool = False,
+                detach_uncertainty: bool = False,
+                matchup_context: torch.Tensor = None):
+        """Forward pass for a single timestep.
+
+        Args:
+            obs: (batch, obs_size)
+            action_mask: (batch, action_size)
+            hidden_state: (h, c) tuple for LSTM, or None for zero init
+            deterministic, detach_uncertainty, matchup_context: same as PolicyValueNet
+
+        Returns:
+            logits, value, q_values, new_hidden_state
+        """
+        backbone_features = self.backbone(obs)
+
+        # LSTM expects (batch, seq_len, features)
+        lstm_input = backbone_features.unsqueeze(1)
+        if hidden_state is None:
+            hidden_state = self.initial_hidden(obs.shape[0], obs.device)
+        lstm_out, new_hidden = self.lstm(lstm_input, hidden_state)
+        features = lstm_out.squeeze(1)  # (batch, lstm_hidden_size)
+
+        # Policy logits (same ensemble logic as PolicyValueNet)
+        if self.num_uncertainty_heads > 1:
+            all_logits = torch.stack(
+                [self.policy_head(features)]
+                + [h(features) for h in self.ensemble_heads],
+                dim=0,
+            )
+            mean_logits = all_logits.mean(dim=0)
+            if deterministic:
+                logits = mean_logits
+            else:
+                std_logits = all_logits.std(dim=0)
+                if detach_uncertainty:
+                    std_logits = std_logits.detach()
+                logits = mean_logits + self.uncertainty_weight * std_logits
+        else:
+            logits = self.policy_head(features)
+
+        logits = logits + (action_mask.log().clamp(min=-1e8))
+
+        # Value head
+        if self.matchup_context_size > 0:
+            if matchup_context is not None:
+                value_input = torch.cat([features, matchup_context], dim=-1)
+            else:
+                padding = features.new_zeros(features.shape[0], self.matchup_context_size)
+                value_input = torch.cat([features, padding], dim=-1)
+        else:
+            value_input = features
+        value = self.value_head(value_input)
+
+        q_values = None
+        if self.q_head is not None:
+            q_values = self.q_head(features)
+            q_values = q_values + (action_mask.log().clamp(min=-1e8))
+
+        return logits, value, q_values, new_hidden
+
+    def forward_sequence(self, obs_seq: torch.Tensor, mask_seq: torch.Tensor,
+                         hidden_state=None,
+                         detach_uncertainty: bool = False,
+                         matchup_context: torch.Tensor = None):
+        """Process a full episode sequence for PPO recomputation.
+
+        Args:
+            obs_seq: (seq_len, obs_size) single episode observations
+            mask_seq: (seq_len, action_size) action masks
+            hidden_state: initial hidden state (or None)
+            matchup_context: (seq_len, context_size) or None
+
+        Returns:
+            logits: (seq_len, action_size)
+            values: (seq_len,)
+            q_values: (seq_len, action_size) or None
+        """
+        seq_len = obs_seq.shape[0]
+        backbone_features = self.backbone(obs_seq)  # (seq_len, hidden)
+
+        # Process full sequence through LSTM
+        lstm_input = backbone_features.unsqueeze(0)  # (1, seq_len, hidden)
+        if hidden_state is None:
+            hidden_state = self.initial_hidden(1, obs_seq.device)
+        lstm_out, _ = self.lstm(lstm_input, hidden_state)
+        features = lstm_out.squeeze(0)  # (seq_len, lstm_hidden)
+
+        # Policy logits
+        if self.num_uncertainty_heads > 1:
+            all_logits = torch.stack(
+                [self.policy_head(features)]
+                + [h(features) for h in self.ensemble_heads],
+                dim=0,
+            )
+            mean_logits = all_logits.mean(dim=0)
+            std_logits = all_logits.std(dim=0)
+            if detach_uncertainty:
+                std_logits = std_logits.detach()
+            logits = mean_logits + self.uncertainty_weight * std_logits
+        else:
+            logits = self.policy_head(features)
+
+        logits = logits + (mask_seq.log().clamp(min=-1e8))
+
+        # Value
+        if self.matchup_context_size > 0:
+            if matchup_context is not None:
+                value_input = torch.cat([features, matchup_context], dim=-1)
+            else:
+                padding = features.new_zeros(seq_len, self.matchup_context_size)
+                value_input = torch.cat([features, padding], dim=-1)
+        else:
+            value_input = features
+        values = self.value_head(value_input).squeeze(-1)
+
+        q_values = None
+        if self.q_head is not None:
+            q_values = self.q_head(features)
+            q_values = q_values + (mask_seq.log().clamp(min=-1e8))
+
+        return logits, values, q_values
+
+    def get_action_and_value(self, obs, action_mask, action=None,
+                              deterministic=False, detach_uncertainty=False,
+                              matchup_context=None):
+        """Compatibility method for non-recurrent PPO update.
+
+        When called without hidden state (during PPO), treats each
+        observation independently (hidden state = zeros).
+        For proper recurrent PPO, use forward_sequence instead.
+        """
+        logits, value, q_values, _ = self.forward(
+            obs, action_mask,
+            deterministic=deterministic,
+            detach_uncertainty=detach_uncertainty,
+            matchup_context=matchup_context,
+        )
+        dist = torch.distributions.Categorical(logits=logits)
+        if action is None:
+            action = dist.sample()
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy()
+        if q_values is not None:
+            return action, log_prob, entropy, value.squeeze(-1), q_values
+        return action, log_prob, entropy, value.squeeze(-1)
+
+    def mean_ensemble_uncertainty(self, obs, action_mask):
+        if self.num_uncertainty_heads <= 1:
+            return 0.0
+        with torch.no_grad():
+            backbone_features = self.backbone(obs)
+            lstm_input = backbone_features.unsqueeze(1)
+            hidden = self.initial_hidden(obs.shape[0], obs.device)
+            lstm_out, _ = self.lstm(lstm_input, hidden)
+            features = lstm_out.squeeze(1)
+            all_logits = torch.stack(
+                [self.policy_head(features)]
+                + [h(features) for h in self.ensemble_heads],
+                dim=0,
+            )
             legal = action_mask > 0
             std = all_logits.std(dim=0)
             if legal.any():

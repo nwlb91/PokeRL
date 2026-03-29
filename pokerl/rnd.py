@@ -24,6 +24,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from pokerl.config import Config
+from pokerl.features import BATTLE_OBS_SIZE, BATTLE_OBS_SIZE_EXTENDED
 from pokerl.models import RNDPredictorNet, RNDTargetNet
 
 logger = logging.getLogger(__name__)
@@ -94,12 +95,15 @@ class RNDExploration:
         self.config = config
         self.device = torch.device(config.device)
 
+        obs_size = BATTLE_OBS_SIZE_EXTENDED if config.team_sheet_obs else BATTLE_OBS_SIZE
         self.target = RNDTargetNet(
+            obs_size=obs_size,
             hidden_size=config.rnd_hidden_size,
             embedding_dim=config.rnd_embedding_dim,
         ).to(self.device)
 
         self.predictor = RNDPredictorNet(
+            obs_size=obs_size,
             hidden_size=config.rnd_hidden_size,
             embedding_dim=config.rnd_embedding_dim,
         ).to(self.device)
