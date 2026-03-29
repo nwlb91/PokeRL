@@ -16,7 +16,11 @@ LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/logs/training.log}"
 # Step 1: Clone Pokemon Showdown if not present
 # ----------------------------------------------------------
 if [ ! -f "${SHOWDOWN_DIR}/index.js" ]; then
-    echo "[launcher] Pokemon Showdown not found. Cloning..."
+    if [ -d "${SHOWDOWN_DIR}" ]; then
+        echo "[launcher] Incomplete Pokemon Showdown found. Removing and re-cloning..."
+        rm -rf "${SHOWDOWN_DIR}"
+    fi
+    echo "[launcher] Cloning Pokemon Showdown..."
     git clone --depth 1 https://github.com/smogon/pokemon-showdown.git "${SHOWDOWN_DIR}"
     echo "[launcher] Installing Showdown dependencies..."
     cd "${SHOWDOWN_DIR}"

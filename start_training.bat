@@ -15,7 +15,11 @@ set LOG_FILE=%~dp0logs\training.log
 :: Step 1: Clone Pokemon Showdown if not present
 :: ----------------------------------------------------------
 if not exist "%SHOWDOWN_DIR%\index.js" (
-    echo [launcher] Pokemon Showdown not found. Cloning...
+    if exist "%SHOWDOWN_DIR%" (
+        echo [launcher] Incomplete Pokemon Showdown found. Removing and re-cloning...
+        rmdir /s /q "%SHOWDOWN_DIR%"
+    )
+    echo [launcher] Cloning Pokemon Showdown...
     git clone --depth 1 https://github.com/smogon/pokemon-showdown.git "%SHOWDOWN_DIR%"
     if errorlevel 1 (
         echo [launcher] ERROR: Failed to clone Pokemon Showdown. Is git installed?
