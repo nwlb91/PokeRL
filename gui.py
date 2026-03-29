@@ -25,7 +25,12 @@ from matplotlib.patches import Patch
 import numpy as np
 import torch
 
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+torch.serialization.add_safe_globals([
+    np._core.multiarray.scalar,
+    np._core.multiarray._reconstruct,
+    np.dtype,
+    np.ndarray,
+])
 
 from poke_env.ps_client.account_configuration import AccountConfiguration
 from poke_env.ps_client.server_configuration import (

@@ -14,7 +14,12 @@ from typing import Optional
 import numpy as np
 import torch
 
-torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+torch.serialization.add_safe_globals([
+    np._core.multiarray.scalar,
+    np._core.multiarray._reconstruct,
+    np.dtype,
+    np.ndarray,
+])
 
 from pokerl.agent import PPOAgent
 from pokerl.config import Config
