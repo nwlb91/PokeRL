@@ -92,6 +92,70 @@ class QueueLogHandler(logging.Handler):
 PADDING = {"padx": 6, "pady": 3}
 
 
+def _make_scrollable_tab(parent):
+    """Create a scrollable frame inside a notebook tab.
+
+    Returns the inner frame that should be used as the parent for widgets.
+    """
+    canvas = tk.Canvas(parent, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+    inner_frame = ttk.Frame(canvas)
+
+    inner_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas_window = canvas.create_window((0, 0), window=inner_frame, anchor="nw")
+
+    # Keep the inner frame width in sync with the canvas width
+    def _on_canvas_configure(event):
+        canvas.itemconfig(canvas_window, width=event.width)
+    canvas.bind("<Configure>", _on_canvas_configure)
+
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    # Bind mousewheel scrolling when the cursor is over the canvas
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_linux_scroll_up(event):
+        canvas.yview_scroll(-1, "units")
+
+    def _on_linux_scroll_down(event):
+        canvas.yview_scroll(1, "units")
+
+    def _bind_mousewheel(event):
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_linux_scroll_up)
+        canvas.bind_all("<Button-5>", _on_linux_scroll_down)
+
+    def _unbind_mousewheel(event):
+        canvas.unbind_all("<MouseWheel>")
+        canvas.unbind_all("<Button-4>")
+        canvas.unbind_all("<Button-5>")
+
+    canvas.bind("<Enter>", _bind_mousewheel)
+    canvas.bind("<Leave>", _unbind_mousewheel)
+
+    return inner_frame
+
+
+def _find_showdown_dir():
+    """Try to auto-detect the pokemon-showdown directory."""
+    project_root = Path(__file__).resolve().parent
+    candidates = [
+        project_root / "pokemon-showdown",
+        project_root.parent / "pokemon-showdown",
+    ]
+    for p in candidates:
+        if p.is_dir() and ((p / "pokemon-showdown").exists() or (p / "index.js").exists()):
+            return str(p)
+    return "pokemon-showdown"
+
+
 class PokeRLApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -130,17 +194,17 @@ class PokeRLApp(tk.Tk):
         self.hidden_var = tk.IntVar(value=256)
         self.device_var = tk.StringVar(value="cpu")
         self.server_port_var = tk.IntVar(value=8000)
-        self.showdown_path_var = tk.StringVar(value="pokemon-showdown")
+        self.showdown_path_var = tk.StringVar(value=_find_showdown_dir())
         self.concurrent_battles_var = tk.IntVar(value=4)
         self.eval_n_battles_var = tk.IntVar(value=50)
 
         # Advanced feature toggles
-        self.team_sheet_obs_var = tk.BooleanVar(value=False)
-        self.use_lstm_var = tk.BooleanVar(value=False)
+        self.team_sheet_obs_var = tk.BooleanVar(value=True)
+        self.use_lstm_var = tk.BooleanVar(value=True)
         self.lstm_hidden_var = tk.IntVar(value=256)
-        self.q_head_var = tk.BooleanVar(value=False)
+        self.q_head_var = tk.BooleanVar(value=True)
         self.search_weight_var = tk.DoubleVar(value=1.0)
-        self.rnd_var = tk.BooleanVar(value=False)
+        self.rnd_var = tk.BooleanVar(value=True)
         self.rnd_coef_var = tk.DoubleVar(value=0.1)
         self.rnd_adaptive_temp_var = tk.BooleanVar(value=True)
 
@@ -160,6 +224,9 @@ class PokeRLApp(tk.Tk):
         self._build_ui()
         self._poll_log_queue()
 
+        # Auto-start the Showdown server after the GUI is fully rendered
+        self.after(500, self._auto_start_server)
+
     # ----- UI construction --------------------------------------------------
 
     def _build_ui(self):
@@ -167,23 +234,27 @@ class PokeRLApp(tk.Tk):
         notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
         # --- Tab 1: Training ---
-        train_frame = ttk.Frame(notebook)
-        notebook.add(train_frame, text="  Training  ")
+        train_outer = ttk.Frame(notebook)
+        notebook.add(train_outer, text="  Training  ")
+        train_frame = _make_scrollable_tab(train_outer)
         self._build_training_tab(train_frame)
 
         # --- Tab 2: Evaluation ---
-        eval_frame = ttk.Frame(notebook)
-        notebook.add(eval_frame, text="  Evaluation  ")
+        eval_outer = ttk.Frame(notebook)
+        notebook.add(eval_outer, text="  Evaluation  ")
+        eval_frame = _make_scrollable_tab(eval_outer)
         self._build_eval_tab(eval_frame)
 
         # --- Tab 3: Challenge ---
-        challenge_frame = ttk.Frame(notebook)
-        notebook.add(challenge_frame, text="  Challenge  ")
+        challenge_outer = ttk.Frame(notebook)
+        notebook.add(challenge_outer, text="  Challenge  ")
+        challenge_frame = _make_scrollable_tab(challenge_outer)
         self._build_challenge_tab(challenge_frame)
 
         # --- Tab 4: Server ---
-        server_frame = ttk.Frame(notebook)
-        notebook.add(server_frame, text="  Server  ")
+        server_outer = ttk.Frame(notebook)
+        notebook.add(server_outer, text="  Server  ")
+        server_frame = _make_scrollable_tab(server_outer)
         self._build_server_tab(server_frame)
 
         # --- Log area (always visible) ---
@@ -837,6 +908,21 @@ class PokeRLApp(tk.Tk):
         return Config(**kwargs)
 
     # ----- Server control ---------------------------------------------------
+
+    def _auto_start_server(self):
+        """Attempt to auto-start the Showdown server on GUI boot."""
+        sd_path = self.showdown_path_var.get().strip()
+        if not sd_path or sd_path == "pokemon-showdown":
+            self._log("Auto-start skipped: Showdown directory not found. Set it in the Server tab.")
+            return
+        ps_main = Path(sd_path) / "pokemon-showdown"
+        if not ps_main.exists():
+            ps_main = Path(sd_path) / "index.js"
+            if not ps_main.exists():
+                self._log("Auto-start skipped: no pokemon-showdown executable found.")
+                return
+        self._log("Auto-starting Showdown server...")
+        self._on_start_server()
 
     def _on_start_server(self):
         sd_path = self.showdown_path_var.get().strip()
