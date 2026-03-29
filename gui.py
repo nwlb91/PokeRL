@@ -25,12 +25,7 @@ from matplotlib.patches import Patch
 import numpy as np
 import torch
 
-torch.serialization.add_safe_globals([
-    np._core.multiarray.scalar,
-    np._core.multiarray._reconstruct,
-    np.dtype,
-    np.ndarray,
-])
+_TORCH_LOAD_KWARGS = {"map_location": "cpu", "weights_only": False}
 
 from poke_env.ps_client.account_configuration import AccountConfiguration
 from poke_env.ps_client.server_configuration import (
@@ -1108,14 +1103,14 @@ class PokeRLApp(tk.Tk):
                         break
 
                     t_name = Path(t_path).stem
-                    t_state = torch.load(t_path, map_location="cpu", weights_only=True)
+                    t_state = torch.load(t_path, **_TORCH_LOAD_KWARGS)
 
                     for o_path in opp_models:
                         if self._training_stop.is_set():
                             break
 
                         o_name = Path(o_path).stem
-                        o_state = torch.load(o_path, map_location="cpu", weights_only=True)
+                        o_state = torch.load(o_path, **_TORCH_LOAD_KWARGS)
 
                         self._log(f"Evaluating {t_name} vs {o_name} ({n_battles} battles)...")
                         self.after(0, lambda: self.eval_status_var.set(f"{t_name} vs {o_name}..."))
@@ -1253,7 +1248,7 @@ class PokeRLApp(tk.Tk):
                     battle_format=battle_format,
                     device="cpu",
                 )
-                state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+                state = torch.load(ckpt_path, **_TORCH_LOAD_KWARGS)
                 agent = PPOAgent(config, agent_id="challenger")
                 # Load agent weights (inference-only, no optimizer state needed)
                 if "agent" in state:

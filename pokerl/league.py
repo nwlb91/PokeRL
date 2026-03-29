@@ -38,12 +38,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-torch.serialization.add_safe_globals([
-    np._core.multiarray.scalar,
-    np._core.multiarray._reconstruct,
-    np.dtype,
-    np.ndarray,
-])
+_TORCH_LOAD_KWARGS = {"map_location": "cpu", "weights_only": False}
 
 from pokerl.agent import PPOAgent
 from pokerl.config import Config
@@ -76,7 +71,7 @@ class LeagueAgent:
         """Lazy-load weights from disk if not already cached."""
         if self._state_dict is None:
             self._state_dict = torch.load(
-                self.checkpoint_path, map_location="cpu", weights_only=True
+                self.checkpoint_path, **_TORCH_LOAD_KWARGS
             )
         return self._state_dict
 
