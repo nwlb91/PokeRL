@@ -127,8 +127,16 @@ class PolicyValueNet(nn.Module):
         logits = logits + (action_mask.log().clamp(min=-1e8))
 
         # Value head with optional matchup conditioning
-        if self.matchup_context_size > 0 and matchup_context is not None:
-            value_input = torch.cat([features, matchup_context], dim=-1)
+        if self.matchup_context_size > 0:
+            if matchup_context is not None:
+                value_input = torch.cat([features, matchup_context], dim=-1)
+            else:
+                # No context provided — pad with zeros so the Linear layer
+                # receives the correct input width.
+                padding = features.new_zeros(
+                    features.shape[0], self.matchup_context_size
+                )
+                value_input = torch.cat([features, padding], dim=-1)
         else:
             value_input = features
         value = self.value_head(value_input)
