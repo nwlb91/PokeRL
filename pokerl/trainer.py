@@ -188,7 +188,45 @@ class Trainer:
             )
         return self._eval_player2
 
-    def _get_league_player(self, league_agent, team_id: int) -> RLPlayer:
+    async def _async_close_player(self, player: "Optional[RLPlayer]") -> None:
+        """Gracefully close a player's WebSocket before dropping it.
+
+        poke-env Player objects hold a PSClient with an open WebSocket.
+        Simply dereferencing the player leaks the connection.  This helper
+        attempts to close it cleanly so zombie connections don't accumulate
+        on the Showdown server.
+        """
+        if player is None:
+            return
+        try:
+            ps_client = getattr(player, "ps_client", None)
+            if ps_client is None:
+                return
+            # Use the internal async version directly since we're already
+            # in the event loop (the public stop_listening() wraps this in
+            # handle_threaded_coroutines which can deadlock here).
+            stop = getattr(ps_client, "_stop_listening", None)
+            if stop is not None:
+                await stop()
+            else:
+                # Fallback: close the websocket directly
+                websocket = getattr(ps_client, "websocket", None)
+                if websocket is not None:
+                    await websocket.close()
+        except Exception:
+            logger.debug("Failed to close player WebSocket cleanly", exc_info=True)
+
+    async def _cleanup_players(self) -> None:
+        """Close all player WebSocket connections on shutdown."""
+        for player in [
+            self._player1, self._player2,
+            self._eval_player1, self._eval_player2,
+            self._league_opponent_player,
+            self._baseline_player1, self._baseline_player2,
+        ]:
+            await self._async_close_player(player)
+
+    async def _get_league_player(self, league_agent, team_id: int) -> RLPlayer:
         """Get or create a frozen player for a league opponent.
 
         Reuses the player if possible, only reloading weights when the
@@ -210,6 +248,9 @@ class Trainer:
 
         # Pick the right team string
         team_str = self.team1_str if team_id == 0 else self.team2_str
+
+        # Close old player's WebSocket before creating a new one
+        await self._async_close_player(self._league_opponent_player)
 
         # Always recreate the player when agent or team changes to ensure
         # the correct team is used (ConstantTeambuilder is set at creation)
@@ -727,6 +768,7 @@ class Trainer:
 
         # Final checkpoint
         self._checkpoint_and_snapshot()
+        await self._cleanup_players()
         logger.info("Training complete!")
 
     async def _run_battle_batch(self, n_battles: int):
@@ -768,7 +810,7 @@ class Trainer:
                 if kind == "pfsp":
                     # Use frozen league opponent
                     opponent_team_id = league_agent.team_id
-                    opponent_player = self._get_league_player(
+                    opponent_player = await self._get_league_player(
                         league_agent, opponent_team_id,
                     )
                     opponent_agent_id = league_agent.agent_id
@@ -799,8 +841,9 @@ class Trainer:
                 f"Battle timed out after {self.config.battle_timeout}s "
                 f"at battle {self.battle_count}. Processing any completed episodes."
             )
-            # Reset league player to avoid stale challenge state
+            # Close and reset league player to avoid stale challenge state
             if use_league:
+                await self._async_close_player(self._league_opponent_player)
                 self._league_opponent_player = None
                 self._league_opponent_id = None
                 self._league_opponent_team_id = None
