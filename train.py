@@ -168,8 +168,9 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Configure logging: console shows errors only, file gets everything
+    # Configure logging: console and file show errors only
     import sys
+    import os
     log_fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -181,18 +182,18 @@ def main():
         if hasattr(sys.stderr, 'buffer'):
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+    # Clear ALL existing handlers on root logger, then add only error handlers
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG)  # allow everything internally, handlers filter
+
     # Console handler: errors only
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.ERROR)
     console_handler.setFormatter(log_fmt)
-
-    logging.basicConfig(
-        level=logging.DEBUG,
-        handlers=[console_handler],
-    )
+    root.addHandler(console_handler)
 
     if args.log_file:
-        import os
         log_dir = os.path.dirname(args.log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
@@ -202,7 +203,15 @@ def main():
         error_handler = logging.FileHandler(error_log, encoding='utf-8')
         error_handler.setLevel(logging.ERROR)
         error_handler.setFormatter(log_fmt)
-        logging.getLogger().addHandler(error_handler)
+        root.addHandler(error_handler)
+
+    # Prevent libraries from adding their own console handlers
+    logging.getLogger("poke_env").handlers.clear()
+    logging.getLogger("poke_env").propagate = True
+    logging.getLogger("websockets").handlers.clear()
+    logging.getLogger("websockets").propagate = True
+    logging.getLogger("asyncio").handlers.clear()
+    logging.getLogger("asyncio").propagate = True
 
     # Build config
     config = Config(
