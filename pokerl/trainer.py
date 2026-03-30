@@ -676,10 +676,15 @@ class Trainer:
                 if not t2_path:
                     continue
 
+                # Prefix opponent names so the BT model distinguishes
+                # team1's "initial" (agent1) from team2's "initial" (agent2).
+                t2_opp_name = f"opp:{t2_name}"
+                t1_opp_name = f"opp:{t1_name}"
+
                 # Skip pairs that already have enough match data
-                t1_key = (t1_name, t2_name)
+                t1_key = (t1_name, t2_opp_name)
                 t1_played = sum(self.scoreboard_team1.matches.get(t1_key, [0, 0]))
-                t2_key = (t2_name, t1_name)
+                t2_key = (t2_name, t1_opp_name)
                 t2_played = sum(self.scoreboard_team2.matches.get(t2_key, [0, 0]))
                 already_played = max(t1_played, t2_played)
                 if already_played >= n_games:
@@ -723,21 +728,21 @@ class Trainer:
                 # Record in team1 scoreboard (team1 player vs team2 opponent)
                 for _ in range(wins):
                     self.scoreboard_team1.record_match(
-                        t1_name, t2_name, a_won=True,
+                        t1_name, t2_opp_name, a_won=True,
                     )
                 for _ in range(losses):
                     self.scoreboard_team1.record_match(
-                        t1_name, t2_name, a_won=False,
+                        t1_name, t2_opp_name, a_won=False,
                     )
 
                 # Record in team2 scoreboard (team2 player vs team1 opponent)
                 for _ in range(losses):
                     self.scoreboard_team2.record_match(
-                        t2_name, t1_name, a_won=True,
+                        t2_name, t1_opp_name, a_won=True,
                     )
                 for _ in range(wins):
                     self.scoreboard_team2.record_match(
-                        t2_name, t1_name, a_won=False,
+                        t2_name, t1_opp_name, a_won=False,
                     )
 
                 logger.info(
