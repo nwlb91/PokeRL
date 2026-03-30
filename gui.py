@@ -1395,7 +1395,7 @@ class PokeRLApp(tk.Tk):
                     port = self.challenge_local_port_var.get()
                     server_cfg = ServerConfiguration(
                         f"ws://localhost:{port}/showdown/websocket",
-                        f"http://localhost:{port}/action.php?",
+                        "https://play.pokemonshowdown.com/action.php?",
                     )
 
                 # Load team
