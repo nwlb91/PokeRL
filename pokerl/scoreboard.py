@@ -102,8 +102,8 @@ class Scoreboard:
             all_players.add(a)
             all_players.add(b)
 
-        # Only rate players on the leaderboard + current candidate
-        players = [n for n in all_players if n in names or n.startswith("current_")]
+        # Only rate players that are on the leaderboard
+        players = [n for n in all_players if n in set(names)]
         if not players:
             return {}
 
@@ -245,11 +245,6 @@ class Scoreboard:
         # The first player seen is always the initial entry
         self.entries = []
         for name in players_seen:
-            # Skip "current_*" entries — those were candidates that may not
-            # have made the leaderboard
-            if name.startswith("current_"):
-                continue
-
             # Try to find the checkpoint
             ckpt_path = self._find_checkpoint(name)
             entry = ScoreboardEntry(
@@ -280,8 +275,7 @@ class Scoreboard:
         if not players_seen:
             return
 
-        # Filter to non-current entries
-        candidates = [p for p in players_seen if not p.startswith("current_")]
+        candidates = list(players_seen)
         if not candidates:
             return
 

@@ -634,9 +634,6 @@ class Trainer:
         import torch as _torch
 
         n_games = self.config.elo_eval_games
-        current_name = f"current_{self.battle_count}"
-
-        # Save current checkpoint for potential leaderboard inclusion
         elo_ckpt_name = f"ckpt_{self.battle_count:06d}"
         elo_ckpt_path = Path(self.config.checkpoint_dir) / f"{elo_ckpt_name}.pt"
         elo_state = {
@@ -676,11 +673,11 @@ class Trainer:
 
             for _ in range(wins):
                 self.scoreboard_team1.record_match(
-                    current_name, entry.name, a_won=True
+                    elo_ckpt_name, entry.name, a_won=True
                 )
             for _ in range(total_played - wins):
                 self.scoreboard_team1.record_match(
-                    current_name, entry.name, a_won=False
+                    elo_ckpt_name, entry.name, a_won=False
                 )
 
             logger.info(
@@ -716,11 +713,11 @@ class Trainer:
 
             for _ in range(wins):
                 self.scoreboard_team2.record_match(
-                    current_name, entry.name, a_won=True
+                    elo_ckpt_name, entry.name, a_won=True
                 )
             for _ in range(total_played - wins):
                 self.scoreboard_team2.record_match(
-                    current_name, entry.name, a_won=False
+                    elo_ckpt_name, entry.name, a_won=False
                 )
 
             logger.info(
@@ -736,7 +733,7 @@ class Trainer:
             (self.scoreboard_team1, "team1"),
             (self.scoreboard_team2, "team2"),
         ]:
-            rating = scoreboard.get_current_rating(current_name)
+            rating = scoreboard.get_current_rating(elo_ckpt_name)
             logger.info(
                 "Elo %s: current rating=%.1f (leaderboard: %s)",
                 team_label, rating,
