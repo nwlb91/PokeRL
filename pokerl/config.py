@@ -101,17 +101,17 @@ class Config:
 
     # --- Uncertainty-weighted exploration ---
     uncertainty_heads: int = 3           # ensemble policy heads (1 = disabled, >1 = enabled)
-    uncertainty_weight: float = 0.5      # logit bonus scaling for per-action uncertainty
+    uncertainty_weight: float = 0.1      # logit bonus scaling for per-action uncertainty
 
     # --- Team sheet observation ---
     team_sheet_obs: bool = True          # encode full movesets for all bench pokemon
 
     # --- LSTM recurrence ---
-    use_lstm: bool = True                # add LSTM between backbone and heads
+    use_lstm: bool = False               # disabled: PPO update discards hidden state (needs recurrent PPO)
     lstm_hidden_size: int = 256          # LSTM hidden state dimension
 
     # --- Q-head search ---
-    q_head_enabled: bool = True          # add Q-value head for action reranking
+    q_head_enabled: bool = False         # disabled by default: enable after policy stabilizes
     search_weight: float = 1.0           # weight of Q-values relative to policy logits
     q_value_coef: float = 0.25           # Q-head loss coefficient during training
 
@@ -123,7 +123,7 @@ class Config:
     device: str = "cpu"
 
     # --- RND state-space exploration ---
-    rnd_enabled: bool = True               # master toggle for RND state-space exploration
+    rnd_enabled: bool = False              # disabled by default: adds exploration noise that can hurt early training
     rnd_coef: float = 0.1                  # intrinsic reward coefficient
     rnd_coef_end: float = 0.01             # final coefficient after annealing
     rnd_anneal_battles: int = 50000        # battles over which to anneal rnd_coef (0 = no anneal)

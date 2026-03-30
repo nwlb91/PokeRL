@@ -200,11 +200,11 @@ class PokeRLApp(tk.Tk):
 
         # Advanced feature toggles
         self.team_sheet_obs_var = tk.BooleanVar(value=True)
-        self.use_lstm_var = tk.BooleanVar(value=True)
+        self.use_lstm_var = tk.BooleanVar(value=False)
         self.lstm_hidden_var = tk.IntVar(value=256)
-        self.q_head_var = tk.BooleanVar(value=True)
+        self.q_head_var = tk.BooleanVar(value=False)
         self.search_weight_var = tk.DoubleVar(value=1.0)
-        self.rnd_var = tk.BooleanVar(value=True)
+        self.rnd_var = tk.BooleanVar(value=False)
         self.rnd_coef_var = tk.DoubleVar(value=0.1)
         self.rnd_adaptive_temp_var = tk.BooleanVar(value=True)
 
@@ -1409,7 +1409,7 @@ class PokeRLApp(tk.Tk):
                     search_weight=saved_cfg.get("search_weight", 1.0),
                     q_value_coef=saved_cfg.get("q_value_coef", 0.25),
                     uncertainty_heads=saved_cfg.get("uncertainty_heads", 3),
-                    uncertainty_weight=saved_cfg.get("uncertainty_weight", 0.5),
+                    uncertainty_weight=saved_cfg.get("uncertainty_weight", 0.1),
                     matchup_conditioned_value=saved_cfg.get("matchup_conditioned_value", True),
                 )
 

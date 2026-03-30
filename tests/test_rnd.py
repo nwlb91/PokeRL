@@ -221,9 +221,9 @@ class TestRNDExploration:
 class TestRNDConfig:
     """Tests for RND configuration validation."""
 
-    def test_rnd_enabled_by_default(self):
+    def test_rnd_disabled_by_default(self):
         config = Config()
-        assert config.rnd_enabled
+        assert not config.rnd_enabled
 
     def test_rnd_enabled(self):
         config = Config(rnd_enabled=True)

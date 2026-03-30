@@ -264,20 +264,27 @@ class PPOAgent:
                 )
                 new_hidden = None
 
-            # Blend policy logits with Q-values for search
+            # Build raw policy distribution (log_prob must come from this
+            # to match what PPO recomputes in _ppo_update via get_action_and_value)
+            raw_dist = torch.distributions.Categorical(logits=logits)
+
+            # Blend policy logits with Q-values for search (affects sampling only)
+            sampling_logits = logits
             if q_values is not None and not deterministic:
-                logits = logits + self.config.search_weight * q_values
+                sampling_logits = logits + self.config.search_weight * q_values
 
             # Apply temperature scaling for novelty-driven exploration
             if temperature != 1.0 and not deterministic:
-                logits = logits / temperature
+                sampling_logits = sampling_logits / temperature
 
-            dist = torch.distributions.Categorical(logits=logits)
             if deterministic:
                 action = logits.argmax(dim=-1)
             else:
-                action = dist.sample()
-            log_prob = dist.log_prob(action)
+                sampling_dist = torch.distributions.Categorical(logits=sampling_logits)
+                action = sampling_dist.sample()
+
+            # Log prob from raw policy -- matches what PPO recomputes
+            log_prob = raw_dist.log_prob(action)
 
         if self.use_lstm:
             return (action.item(), log_prob.item(), value.squeeze().item(), new_hidden)
