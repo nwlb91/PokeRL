@@ -207,6 +207,8 @@ class PokeRLApp(tk.Tk):
         self.rnd_var = tk.BooleanVar(value=False)
         self.rnd_coef_var = tk.DoubleVar(value=0.1)
         self.rnd_adaptive_temp_var = tk.BooleanVar(value=True)
+        self.elo_eval_interval_var = tk.IntVar(value=1000)
+        self.elo_eval_games_var = tk.IntVar(value=20)
 
         # Challenge tab variables
         self.challenge_checkpoint_var = tk.StringVar(value="")
@@ -338,6 +340,12 @@ class PokeRLApp(tk.Tk):
             adv, text="Adaptive temp",
             variable=self.rnd_adaptive_temp_var,
         ).grid(row=2, column=3, sticky="w", **PADDING)
+
+        # Row 3: Elo Scoreboard
+        ttk.Label(adv, text="Elo eval interval:").grid(row=3, column=0, sticky="e", **PADDING)
+        ttk.Entry(adv, textvariable=self.elo_eval_interval_var, width=8).grid(row=3, column=1, sticky="w", **PADDING)
+        ttk.Label(adv, text="Elo eval games:").grid(row=3, column=2, sticky="e", **PADDING)
+        ttk.Entry(adv, textvariable=self.elo_eval_games_var, width=8).grid(row=3, column=3, sticky="w", **PADDING)
 
         # --- Controls ---
         ctrl = ttk.Frame(parent)
@@ -900,6 +908,8 @@ class PokeRLApp(tk.Tk):
             rnd_enabled=self.rnd_var.get(),
             rnd_coef=self.rnd_coef_var.get(),
             rnd_adaptive_temp=self.rnd_adaptive_temp_var.get(),
+            elo_eval_interval=self.elo_eval_interval_var.get(),
+            elo_eval_games=self.elo_eval_games_var.get(),
         )
         ckpt = self.checkpoint_var.get().strip()
         if ckpt:

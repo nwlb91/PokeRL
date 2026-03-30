@@ -80,6 +80,55 @@ class LeagueAgent:
         self._state_dict = None
 
 
+class WinLossTracker:
+    """Tracks raw win/loss records between agent pairs.
+
+    Unlike :class:`PayoffMatrix` which uses EMA, this stores exact integer
+    counts so league admission and pruning can use actual win records.
+    """
+
+    def __init__(self):
+        # (agent_a, agent_b) -> (a_wins, a_losses)
+        self._records: Dict[Tuple[str, str], Tuple[int, int]] = {}
+
+    def record_result(self, agent_a: str, agent_b: str, a_won: bool):
+        """Record a single game result for both perspectives."""
+        key_ab = (agent_a, agent_b)
+        key_ba = (agent_b, agent_a)
+        w_ab, l_ab = self._records.get(key_ab, (0, 0))
+        w_ba, l_ba = self._records.get(key_ba, (0, 0))
+        if a_won:
+            self._records[key_ab] = (w_ab + 1, l_ab)
+            self._records[key_ba] = (w_ba, l_ba + 1)
+        else:
+            self._records[key_ab] = (w_ab, l_ab + 1)
+            self._records[key_ba] = (w_ba + 1, l_ba)
+
+    def get_record(self, agent_a: str, agent_b: str) -> Tuple[int, int]:
+        """Return (wins, losses) for agent_a vs agent_b."""
+        return self._records.get((agent_a, agent_b), (0, 0))
+
+    def has_winning_record(self, agent_a: str, agent_b: str) -> bool:
+        """True if agent_a has more wins than losses vs agent_b."""
+        wins, losses = self.get_record(agent_a, agent_b)
+        return wins > losses
+
+    def get_state_dict(self) -> dict:
+        return {
+            "records": {
+                f"{a}|{b}": [w, l]
+                for (a, b), (w, l) in self._records.items()
+            }
+        }
+
+    def load_state_dict(self, state: dict):
+        self._records = {}
+        for key_str, (w, l) in state.get("records", {}).items():
+            parts = key_str.split("|", 1)
+            if len(parts) == 2:
+                self._records[(parts[0], parts[1])] = (int(w), int(l))
+
+
 class PayoffMatrix:
     """Tracks win rates between agent pairs using exponential moving average.
 
@@ -145,6 +194,7 @@ class League:
         self.config = config
         self.agents: List[LeagueAgent] = []  # frozen snapshots
         self.payoff = PayoffMatrix(decay=config.payoff_decay)
+        self.win_loss = WinLossTracker()
         self.checkpoint_dir = Path(config.checkpoint_dir) / "league"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self._next_id = 0
@@ -157,32 +207,32 @@ class League:
 
     def add_agent(self, agent: PPOAgent, team_id: int,
                   current_win_rate: float = 0.5,
-                  exploit_win_rate: Optional[float] = None) -> Optional[str]:
+                  exploit_win_rate: Optional[float] = None,
+                  current_bt_rating: Optional[float] = None) -> Optional[str]:
         """Snapshot a training agent and add it to the league *if* it passes
         the admission gate.
 
-        All thresholds are **relative** to the team's own history so that
-        asymmetric matchups (where one team has a structural WR advantage)
-        don't bias admission.
-
         Admission is granted when any of the following hold:
+
         - The team has fewer agents than ``league_min_size // 2`` (cold start).
-        - The agent is relatively strong: its win rate exceeds the mean WR
-          of existing same-team league agents by ``league_admit_win_rate_delta``.
-        - The agent is a relatively strong exploiter: its WR against the
-          opposing team's best agent exceeds the team's mean exploit WR by
-          ``league_admit_win_rate_delta``.
-        - The agent's parameters are novel (relative L2 ≥
-          ``league_admit_param_novelty``) AND its win rate is at least as
-          high as the team's mean WR.
+        - **Strength (BT rating)**: The agent's Bradley-Terry rating exceeds
+          the maximum rating of existing same-team league agents by
+          ``league_admit_win_rate_delta`` (scaled to rating space).  Falls
+          back to win-rate comparison when no BT rating is available.
+        - **Exploitation (win record)**: The agent has a winning W/L record
+          vs any league agent from the opposing team.
+        - **Parameter novelty**: The agent's parameters are novel (relative
+          L2 ≥ ``league_admit_param_novelty``) AND its win rate is at least
+          as high as the team's mean WR.
 
         Args:
             agent: The live training agent to snapshot.
             team_id: Which team this agent belongs to (0 or 1).
             current_win_rate: The agent's recent overall win rate.
             exploit_win_rate: The agent's payoff win rate vs the opposing
-                team's best league agent, if one exists.  ``None`` when there
-                is no best agent to compare against.
+                team's best league agent, if one exists.
+            current_bt_rating: The agent's current Bradley-Terry rating
+                from the Elo scoreboard, if available.
 
         Returns:
             The league agent's ID if admitted, ``None`` otherwise.
@@ -194,20 +244,38 @@ class League:
             return self._admit_agent(agent, team_id, current_win_rate)
 
         delta = self.config.league_admit_win_rate_delta
-        mean_wr = self._team_mean_win_rate(team_agents)
 
-        # Gate 1: Relative strength — agent outperforms its team's average
-        if current_win_rate >= mean_wr + delta:
-            return self._admit_agent(agent, team_id, current_win_rate)
+        # Gate 1: Strength — BT rating exceeds team max, or fallback to WR
+        if current_bt_rating is not None and team_agents:
+            team_ratings = [
+                getattr(a, 'bt_rating', None) for a in team_agents
+            ]
+            team_ratings = [r for r in team_ratings if r is not None]
+            if team_ratings:
+                # Scale delta to rating space (delta of 0.05 WR ≈ 50 rating)
+                rating_delta = delta * 1000
+                if current_bt_rating >= max(team_ratings) + rating_delta:
+                    return self._admit_agent(agent, team_id, current_win_rate)
+            else:
+                # No BT ratings on existing agents yet — fall back to WR
+                mean_wr = self._team_mean_win_rate(team_agents)
+                if current_win_rate >= mean_wr + delta:
+                    return self._admit_agent(agent, team_id, current_win_rate)
+        else:
+            mean_wr = self._team_mean_win_rate(team_agents)
+            if current_win_rate >= mean_wr + delta:
+                return self._admit_agent(agent, team_id, current_win_rate)
 
-        # Gate 2: Relative exploitation — agent exploits the best opposing
-        # agent better than its team's historical average against that agent
-        if exploit_win_rate is not None:
-            mean_exploit = self._team_mean_exploit_wr(team_agents)
-            if exploit_win_rate >= mean_exploit + delta:
+        # Gate 2: Exploitation — agent has a winning W/L record vs any
+        # opposing-team league agent
+        opp_team_id = 1 - team_id
+        opp_agents = self.get_team_agents(opp_team_id)
+        for opp in opp_agents:
+            if self.win_loss.has_winning_record(agent.agent_id, opp.agent_id):
                 return self._admit_agent(agent, team_id, current_win_rate)
 
         # Gate 3: Parameter novelty with a relative strength floor
+        mean_wr = self._team_mean_win_rate(team_agents)
         if current_win_rate >= mean_wr:
             candidate_state = agent.get_state_dict()
             min_dist = self._min_param_distance(candidate_state, team_agents)
@@ -219,7 +287,7 @@ class League:
         logger.debug(
             f"League admission denied for team {team_id}: "
             f"wr={current_win_rate:.4f} (team_mean={mean_wr:.4f}, "
-            f"need +{delta}), exploit_wr={exploit_win_rate}, "
+            f"need +{delta}), bt_rating={current_bt_rating}, "
             f"param_novelty={min_dist:.4f} (need {self.config.league_admit_param_novelty})"
         )
         return None
@@ -460,46 +528,44 @@ class League:
                             to_remove.add(agent.agent_id)
                             break
 
-        # Pass 2: Staleness-based pruning (relative to team average)
-        # An agent is stale when every live agent beats it by a large margin
-        # above the live agent's average WR against that team.
-        if self.live_agent_ids:
-            margin = self.config.league_prune_stale_margin
-            for agent in self.agents:
-                if (agent.agent_id in protected or agent.is_best
-                        or agent.agent_id in to_remove):
+        # Pass 2: Staleness-based pruning using win records.
+        # An agent is stale when it does NOT have a winning W/L record
+        # vs ANY other current league agent.
+        remaining_ids = set(
+            a.agent_id for a in self.agents if a.agent_id not in to_remove
+        )
+        for agent in self.agents:
+            if (agent.agent_id in protected or agent.is_best
+                    or agent.agent_id in to_remove):
+                continue
+
+            has_any_winning = False
+            for other in self.agents:
+                if (other.agent_id == agent.agent_id
+                        or other.agent_id in to_remove):
                     continue
+                if self.win_loss.has_winning_record(
+                    agent.agent_id, other.agent_id
+                ):
+                    has_any_winning = True
+                    break
 
-                # Check if all live agents dominate this league agent
-                # relative to their average WR against the agent's team
-                dominated = True
-                for live_id in self.live_agent_ids:
-                    mean_wr = self._live_mean_wr_vs_team(
-                        live_id, agent.team_id, exclude=to_remove,
-                    )
-                    wr_vs_agent = self.payoff.get_win_rate(
-                        live_id, agent.agent_id,
-                    )
-                    if wr_vs_agent < mean_wr + margin:
-                        dominated = False
-                        break
+            if has_any_winning:
+                continue
 
-                if not dominated:
-                    continue
-
-                # Protect if this agent uniquely exploits another league member
-                if self._is_unique_exploiter(agent, to_remove):
-                    logger.debug(
-                        f"Stale agent {agent.agent_id} kept: uniquely "
-                        f"exploits another league member"
-                    )
-                    continue
-
-                to_remove.add(agent.agent_id)
+            # Protect if this agent uniquely exploits another league member
+            if self._is_unique_exploiter(agent, to_remove):
                 logger.debug(
-                    f"Stale agent {agent.agent_id} marked for removal "
-                    f"(dominated by all live agents, margin={margin})"
+                    f"Stale agent {agent.agent_id} kept: uniquely "
+                    f"exploits another league member"
                 )
+                continue
+
+            to_remove.add(agent.agent_id)
+            logger.debug(
+                f"Stale agent {agent.agent_id} marked for removal "
+                f"(no winning record vs any league agent)"
+            )
 
         # Never prune below minimum size
         max_removable = len(self.agents) - self.config.league_min_size
@@ -687,6 +753,7 @@ class League:
                 for a in self.agents
             ],
             "payoff": self.payoff.get_state_dict(),
+            "win_loss": self.win_loss.get_state_dict(),
         }
 
     def load_state_dict(self, state: dict):
@@ -694,6 +761,8 @@ class League:
         self._last_prune_battle = state.get("last_prune_battle", 0)
         self.live_agent_ids = state.get("live_agent_ids", [])
         self.payoff.load_state_dict(state["payoff"])
+        if "win_loss" in state:
+            self.win_loss.load_state_dict(state["win_loss"])
 
         self.agents = []
         for agent_data in state["agents"]:

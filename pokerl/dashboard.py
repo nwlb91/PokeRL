@@ -32,6 +32,8 @@ _state = {
     "agent1_losses": 0,
     "agent2_wins": 0,
     "agent2_losses": 0,
+    "elo_leaderboard_team1": [],
+    "elo_leaderboard_team2": [],
     "start_time": time.time(),
     "last_update": time.time(),
 }
@@ -88,6 +90,8 @@ def update_dashboard(
             _state["agent1_losses"] = agent1_losses
             _state["agent2_wins"] = agent2_wins
             _state["agent2_losses"] = agent2_losses
+            _state["elo_leaderboard_team1"] = kwargs.get("elo_leaderboard_team1", [])
+            _state["elo_leaderboard_team2"] = kwargs.get("elo_leaderboard_team2", [])
             _state["last_update"] = time.time()
 
             if plateau_detector is not None:

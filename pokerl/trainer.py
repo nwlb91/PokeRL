@@ -32,6 +32,7 @@ from pokerl.league import League
 from pokerl.plateau import PlateauDetector, PlateauInfo
 from pokerl.features import BATTLE_OBS_SIZE, TEAM_PREVIEW_OBS_SIZE
 from pokerl.rnd import RNDExploration
+from pokerl.scoreboard import Scoreboard
 from pokerl.teamsheet import parse_team
 from pokerl.win_probability import WinProbabilityEstimator
 
@@ -126,6 +127,26 @@ class Trainer:
         self._league_opponent_player: Optional[RLPlayer] = None
         self._league_opponent_id: Optional[str] = None
         self._league_opponent_team_id: Optional[int] = None
+
+        # Elo scoreboards (one per team)
+        self.scoreboard_team1 = Scoreboard(
+            team_id=0,
+            checkpoint_dir=config.checkpoint_dir,
+            eval_interval=config.elo_eval_interval,
+            eval_games=config.elo_eval_games,
+        )
+        self.scoreboard_team2 = Scoreboard(
+            team_id=1,
+            checkpoint_dir=config.checkpoint_dir,
+            eval_interval=config.elo_eval_interval,
+            eval_games=config.elo_eval_games,
+        )
+        self._last_elo_eval = 0
+
+        # Dedicated eval players for Elo scoreboard matches
+        self._elo_opponent_agent: Optional[PPOAgent] = None
+        self._elo_opponent_player: Optional[RLPlayer] = None
+        self._elo_opponent_team_id: Optional[int] = None
 
         # Per-team baselines for absolute skill measurement
         self._baseline_agent1: Optional[PPOAgent] = None  # best known team1 agent
@@ -267,6 +288,7 @@ class Trainer:
             self._player1, self._player2,
             self._eval_player1, self._eval_player2,
             self._league_opponent_player,
+            self._elo_opponent_player,
             self._baseline_player1, self._baseline_player2,
         ]:
             await self._async_close_player(player)
@@ -569,6 +591,171 @@ class Trainer:
                 self.battle_count,
             )
 
+    async def _get_elo_opponent_player(self, state_dict: dict,
+                                       team_id: int) -> RLPlayer:
+        """Get or create an eval player for Elo scoreboard matches.
+
+        Loads *state_dict* weights into a reusable agent/player pair.
+        Recreates the player when the team side changes.
+        """
+        if self._elo_opponent_agent is None:
+            self._elo_opponent_agent = PPOAgent(
+                self.config, agent_id="elo_eval_opponent"
+            )
+
+        self._elo_opponent_agent.load_weights_only(state_dict)
+        self._elo_opponent_agent.set_eval()
+
+        if (self._elo_opponent_player is not None
+                and self._elo_opponent_team_id == team_id):
+            return self._elo_opponent_player
+
+        team_str = self.team1_str if team_id == 0 else self.team2_str
+        await self._async_close_player(self._elo_opponent_player)
+        self._elo_opponent_player = create_player(
+            agent=self._elo_opponent_agent,
+            config=self.config,
+            team_str=team_str,
+            collect_data=False,
+            deterministic=False,
+            max_concurrent=self._n_concurrent,
+            server_configuration=self.server_config,
+        )
+        self._setup_player(self._elo_opponent_player, team_id=team_id)
+        self._elo_opponent_team_id = team_id
+        return self._elo_opponent_player
+
+    async def _run_elo_evaluation(self):
+        """Evaluate the current model against all scoreboard entries.
+
+        For team1 scoreboard: current agent1 (team1) vs checkpoint agent2 (team2).
+        For team2 scoreboard: current agent2 (team2) vs checkpoint agent1 (team1).
+        """
+        import torch as _torch
+
+        n_games = self.config.elo_eval_games
+        current_name = f"current_{self.battle_count}"
+
+        # Save current checkpoint for potential leaderboard inclusion
+        elo_ckpt_name = f"ckpt_{self.battle_count:06d}"
+        elo_ckpt_path = Path(self.config.checkpoint_dir) / f"{elo_ckpt_name}.pt"
+        elo_state = {
+            "agent1": self.agent1.get_state_dict(),
+            "agent2": self.agent2.get_state_dict(),
+        }
+        _torch.save(elo_state, elo_ckpt_path)
+
+        self.agent1.set_eval()
+        self.agent2.set_eval()
+
+        # --- Team1 scoreboard: current agent1 vs checkpoint agent2 ---
+        for entry in self.scoreboard_team1.entries:
+            ckpt = _torch.load(
+                entry.checkpoint_path, map_location="cpu", weights_only=False,
+            )
+            # Load checkpoint's agent2 as the opponent (team2 side)
+            agent2_state = ckpt.get("agent2", ckpt.get("agent", {}))
+            opp_player = await self._get_elo_opponent_player(agent2_state, team_id=1)
+
+            eval_player1 = self._get_or_create_eval_player1()
+            wins_before = eval_player1.n_won_battles
+            total_before = eval_player1.n_finished_battles
+
+            try:
+                await asyncio.wait_for(
+                    eval_player1.battle_against(opp_player, n_battles=n_games),
+                    timeout=self.config.battle_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Elo eval timed out: current team1 vs %s", entry.name
+                )
+
+            total_played = eval_player1.n_finished_battles - total_before
+            wins = eval_player1.n_won_battles - wins_before
+
+            for _ in range(wins):
+                self.scoreboard_team1.record_match(
+                    current_name, entry.name, a_won=True
+                )
+            for _ in range(total_played - wins):
+                self.scoreboard_team1.record_match(
+                    current_name, entry.name, a_won=False
+                )
+
+            logger.info(
+                "Elo eval team1: current vs '%s' = %d/%d wins",
+                entry.name, wins, total_played,
+            )
+
+        # --- Team2 scoreboard: current agent2 vs checkpoint agent1 ---
+        for entry in self.scoreboard_team2.entries:
+            ckpt = _torch.load(
+                entry.checkpoint_path, map_location="cpu", weights_only=False,
+            )
+            # Load checkpoint's agent1 as the opponent (team1 side)
+            agent1_state = ckpt.get("agent1", ckpt.get("agent", {}))
+            opp_player = await self._get_elo_opponent_player(agent1_state, team_id=0)
+
+            eval_player2 = self._get_or_create_eval_player2()
+            wins_before = eval_player2.n_won_battles
+            total_before = eval_player2.n_finished_battles
+
+            try:
+                await asyncio.wait_for(
+                    eval_player2.battle_against(opp_player, n_battles=n_games),
+                    timeout=self.config.battle_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Elo eval timed out: current team2 vs %s", entry.name
+                )
+
+            total_played = eval_player2.n_finished_battles - total_before
+            wins = eval_player2.n_won_battles - wins_before
+
+            for _ in range(wins):
+                self.scoreboard_team2.record_match(
+                    current_name, entry.name, a_won=True
+                )
+            for _ in range(total_played - wins):
+                self.scoreboard_team2.record_match(
+                    current_name, entry.name, a_won=False
+                )
+
+            logger.info(
+                "Elo eval team2: current vs '%s' = %d/%d wins",
+                entry.name, wins, total_played,
+            )
+
+        self.agent1.set_train()
+        self.agent2.set_train()
+
+        # Compute ratings and decide whether to add to leaderboards
+        for scoreboard, team_label in [
+            (self.scoreboard_team1, "team1"),
+            (self.scoreboard_team2, "team2"),
+        ]:
+            rating = scoreboard.get_current_rating(current_name)
+            logger.info(
+                "Elo %s: current rating=%.1f (leaderboard: %s)",
+                team_label, rating,
+                ", ".join(
+                    f"{e.name}={e.rating:.1f}" for e in scoreboard.entries
+                ),
+            )
+
+            if scoreboard.should_add(rating):
+                scoreboard.add_entry(
+                    name=elo_ckpt_name,
+                    battle_count=self.battle_count,
+                    checkpoint_path=str(elo_ckpt_path),
+                )
+                logger.info(
+                    "Elo %s: '%s' added to leaderboard (rating=%.1f)",
+                    team_label, elo_ckpt_name, rating,
+                )
+
     def resume_if_available(self):
         """Resume from latest checkpoint if available."""
         if self.config.resume:
@@ -598,7 +785,19 @@ class Trainer:
                     self.rnd.load_state_dict(rnd_state)
                     logger.info("Restored RND state from checkpoint")
 
+            # Restore Elo eval counter
+            if meta is not None:
+                self._last_elo_eval = meta.get("last_elo_eval", 0)
+
             logger.info(f"Resumed from battle {self.battle_count}")
+
+        # Reconstruct scoreboards from JSONL logs (works for both resume and fresh)
+        loaded_t1 = self.scoreboard_team1.load_from_log()
+        loaded_t2 = self.scoreboard_team2.load_from_log()
+        if loaded_t1:
+            logger.info("Scoreboard team1 restored from log")
+        if loaded_t2:
+            logger.info("Scoreboard team2 restored from log")
 
     def _fresh_start_from_checkpoint(self):
         """Load network weights from checkpoint but reset all training state.
@@ -670,6 +869,23 @@ class Trainer:
         # Freeze per-team baselines for absolute skill evaluation
         if self.config.baseline_eval_enabled:
             await self._init_baselines()
+
+        # Initialize Elo scoreboards if no entries loaded from log
+        if not self.scoreboard_team1.entries:
+            import torch as _torch
+            initial_path = Path(self.config.checkpoint_dir) / "initial_elo.pt"
+            if not initial_path.exists():
+                _torch.save(
+                    {"agent1": self.agent1.get_state_dict(),
+                     "agent2": self.agent2.get_state_dict()},
+                    initial_path,
+                )
+            self.scoreboard_team1.add_initial(
+                "initial", self.battle_count, str(initial_path)
+            )
+            self.scoreboard_team2.add_initial(
+                "initial", self.battle_count, str(initial_path)
+            )
 
         logger.info(
             f"Starting training: {self.config.total_battles} battles, "
@@ -784,6 +1000,12 @@ class Trainer:
                         else:
                             logger.warning("Baseline eval: some battles did not complete, skipping")
 
+            # Periodic Elo scoreboard evaluation
+            if (self.config.elo_eval_interval > 0 and
+                    self.battle_count - self._last_elo_eval >= self.config.elo_eval_interval):
+                await self._run_elo_evaluation()
+                self._last_elo_eval = self.battle_count
+
             # Periodic logging + plateau detection
             if self.battle_count - self._last_stats_log >= 50:
                 self._last_stats_log = self.battle_count
@@ -837,6 +1059,8 @@ class Trainer:
                     agent1_losses=self.agent1.losses,
                     agent2_wins=self.agent2.wins,
                     agent2_losses=self.agent2.losses,
+                    elo_leaderboard_team1=self.scoreboard_team1.get_state_for_dashboard(),
+                    elo_leaderboard_team2=self.scoreboard_team2.get_state_for_dashboard(),
                 )
 
         # Final checkpoint
@@ -971,6 +1195,9 @@ class Trainer:
 
             # Record payoff with correct agent IDs
             self.league.payoff.record_result(
+                training_agent.agent_id, opponent_agent_id, tp_won,
+            )
+            self.league.win_loss.record_result(
                 training_agent.agent_id, opponent_agent_id, tp_won,
             )
 
@@ -1202,6 +1429,7 @@ class Trainer:
                 "baseline_promotions_team2": self._baseline2_promotions,
                 "team1_wr_ema": self._team1_wr_ema,
                 "team2_wr_ema": self._team2_wr_ema,
+                "last_elo_eval": self._last_elo_eval,
             },
         )
 

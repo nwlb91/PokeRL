@@ -100,13 +100,24 @@ External modules are attached by the trainer:
 4. PPO updates when rollout buffer is full
 5. RND predictor training alongside PPO updates
 6. Periodic: checkpoints, league snapshots, greedy evaluation, baseline evaluation, plateau detection
+7. Elo scoreboard evaluation every `elo_eval_interval` battles
+
+### Elo Scoreboard (`pokerl/scoreboard.py`)
+
+Separate per-team leaderboards using **Bradley-Terry MLE** ratings:
+- Team1 scoreboard: current agent1 (team1) vs checkpoint agent2 (team2)
+- Team2 scoreboard: current agent2 (team2) vs checkpoint agent1 (team1)
+- Initial checkpoint pinned at rating 1000; new entries added only if stronger than all existing
+- All match results persisted to JSONL files (`checkpoints/elo_matches_team{1,2}.jsonl`) for resume
+- Bradley-Terry iterative fixed-point: `r_i = W_i / sum_j(N_ij / (r_i + r_j))`, first player pinned at 1000
 
 ### AlphaStar League (`pokerl/league.py`)
 
 Maintains a pool of frozen agent checkpoints with:
 - PFSP opponent selection (prioritize opponents the agent loses to)
-- Admission gates (strength, exploitation, or parameter novelty)
-- Pruning (similarity-based and staleness-based)
+- Admission gates: BT rating strength, win-record exploitation, or parameter novelty
+- `WinLossTracker`: raw W/L records between agent pairs for league eligibility
+- Pruning: similarity-based and win-record staleness (agents with no winning matchup removed)
 - Payoff matrix tracking with EMA decay
 
 ### Reward System
@@ -139,6 +150,8 @@ All advanced features are opt-in via `Config` (and exposed in GUI under "Advance
 | RND adaptive temp | `rnd_adaptive_temp` | True | Scale action temperature by state novelty |
 | Uncertainty heads | `uncertainty_heads` | 3 | Ensemble policy heads for uncertainty-weighted exploration |
 | Matchup conditioning | `matchup_conditioned_value` | True | Feed team WR EMA to value head |
+| Elo eval interval | `elo_eval_interval` | 1000 | Battles between Elo scoreboard evaluations |
+| Elo eval games | `elo_eval_games` | 20 | Games per matchup during Elo evaluation |
 
 ## File Map
 
@@ -164,6 +177,7 @@ PokeRL/
 │   ├── league.py             # AlphaStar League (PFSP, admission, pruning, payoff)
 │   ├── win_probability.py    # WP estimator for reward shaping
 │   ├── rnd.py                # RND exploration (RunningMeanStd, RNDExploration)
+│   ├── scoreboard.py         # Elo scoreboard with Bradley-Terry ratings
 │   ├── teamsheet.py          # Showdown team file parser
 │   ├── checkpoint.py         # Checkpoint save/load manager
 │   └── plateau.py            # Plateau detection and response

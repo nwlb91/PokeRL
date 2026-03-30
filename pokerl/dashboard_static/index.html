@@ -84,6 +84,35 @@
   .plateau-badge.learning { background: #1b3a2a; color: var(--green); }
   .plateau-badge.plateau { background: #3a1b1b; color: var(--red); }
   .plateau-badge.unknown { background: #2a2d3a; color: var(--dim); }
+
+  .leaderboard-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .leaderboard-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .leaderboard-table th {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 2px solid var(--border);
+    color: var(--dim);
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+  }
+  .leaderboard-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .leaderboard-table tr:last-child td { border-bottom: none; }
+  .leaderboard-table .rank { color: var(--accent); font-weight: 700; width: 40px; }
+  .leaderboard-table .rating { color: var(--green); font-weight: 600; }
+  .leaderboard-empty { color: var(--dim); font-style: italic; padding: 16px 0; }
 </style>
 </head>
 <body>
@@ -124,6 +153,17 @@
   <div class="stat-card">
     <div class="stat-label">Elapsed</div>
     <div class="stat-value" id="elapsed">--</div>
+  </div>
+</div>
+
+<div class="leaderboard-grid">
+  <div class="chart-card">
+    <h2>Team 1 Elo Scoreboard</h2>
+    <div id="leaderboard1"></div>
+  </div>
+  <div class="chart-card">
+    <h2>Team 2 Elo Scoreboard</h2>
+    <div id="leaderboard2"></div>
   </div>
 </div>
 
@@ -241,6 +281,27 @@ function metricsToXY(metrics, key) {
     .map(m => ({ x: m.battle_count, y: m[key] }));
 }
 
+function renderLeaderboard(containerId, entries) {
+  const el = document.getElementById(containerId);
+  if (!entries || entries.length === 0) {
+    el.innerHTML = '<div class="leaderboard-empty">No entries yet — first evaluation pending</div>';
+    return;
+  }
+  let html = '<table class="leaderboard-table"><thead><tr>' +
+    '<th>Rank</th><th>Name</th><th>Rating</th><th>Games Trained</th>' +
+    '</tr></thead><tbody>';
+  for (const e of entries) {
+    html += '<tr>' +
+      '<td class="rank">#' + e.rank + '</td>' +
+      '<td>' + e.name + '</td>' +
+      '<td class="rating">' + e.rating.toFixed(1) + '</td>' +
+      '<td>' + (e.battle_count || 0).toLocaleString() + '</td>' +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
 let lastBattle = 0;
 let lastUpdate = Date.now();
 
@@ -307,6 +368,10 @@ async function poll() {
       valueChart.data.datasets[1].data = metricsToXY(d.metrics, 'mean_episode_return');
       valueChart.update();
     }
+
+    // Elo leaderboards
+    renderLeaderboard('leaderboard1', d.elo_leaderboard_team1 || []);
+    renderLeaderboard('leaderboard2', d.elo_leaderboard_team2 || []);
 
     lastBattle = d.battle_count;
   } catch (e) {

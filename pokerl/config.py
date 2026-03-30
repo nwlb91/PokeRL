@@ -134,6 +134,10 @@ class Config:
     rnd_temp_min: float = 0.8              # temperature floor (familiar states)
     rnd_temp_max: float = 2.0              # temperature ceiling (novel states)
 
+    # --- Elo Scoreboard ---
+    elo_eval_interval: int = 1000         # battles between Elo evaluations
+    elo_eval_games: int = 20              # games per matchup during Elo eval
+
     # --- Plateau response ---
     plateau_action: str = "entropy_bump"  # "entropy_bump", "noise_inject", or "none"
     plateau_entropy_bump: float = 0.03    # temporary entropy increase on plateau
@@ -178,6 +182,8 @@ class Config:
         _check_positive("rnd_lr", self.rnd_lr)
         _check_positive("rnd_temp_min", self.rnd_temp_min)
         _check_positive("rnd_temp_max", self.rnd_temp_max)
+        _check_positive("elo_eval_interval", self.elo_eval_interval)
+        _check_positive("elo_eval_games", self.elo_eval_games)
         if self.rnd_temp_min > self.rnd_temp_max:
             raise ValueError(
                 f"rnd_temp_min ({self.rnd_temp_min}) must be <= "

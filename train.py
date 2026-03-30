@@ -148,6 +148,12 @@ def parse_args():
     parser.add_argument("--device", default="cpu",
                         help="Device for training (cpu/cuda)")
 
+    # Elo Scoreboard
+    parser.add_argument("--elo-eval-interval", type=int, default=1000,
+                        help="Battles between Elo scoreboard evaluations (default: 1000)")
+    parser.add_argument("--elo-eval-games", type=int, default=20,
+                        help="Games per matchup during Elo evaluation (default: 20)")
+
     # Dashboard
     parser.add_argument("--dashboard", action="store_true",
                         help="Enable web dashboard for monitoring training")
@@ -254,6 +260,8 @@ def main():
         uncertainty_heads=args.uncertainty_heads,
         uncertainty_weight=args.uncertainty_weight,
         total_battles=args.total_battles,
+        elo_eval_interval=args.elo_eval_interval,
+        elo_eval_games=args.elo_eval_games,
         infinite_training=args.infinite,
         device=args.device,
         plateau_action=args.plateau_action,
