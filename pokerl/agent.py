@@ -499,18 +499,39 @@ class PPOAgent:
         self.agent_id = state.get("agent_id", self.agent_id)
         self.battle_net.load_state_dict(state["battle_net"], strict=False)
         self.preview_net.load_state_dict(state["preview_net"], strict=False)
+        # Optimizer/scheduler state may be incompatible if the network
+        # architecture changed between checkpoint and current config.
+        # Fall back to fresh optimizer state when that happens.
         if "battle_optimizer" in state:
-            self.battle_optimizer.load_state_dict(state["battle_optimizer"])
+            try:
+                self.battle_optimizer.load_state_dict(state["battle_optimizer"])
+            except (ValueError, RuntimeError):
+                logger.warning(
+                    "Battle optimizer state incompatible with current model — "
+                    "using fresh optimizer (momentum/schedule will be reset)"
+                )
         if "preview_optimizer" in state:
-            self.preview_optimizer.load_state_dict(state["preview_optimizer"])
+            try:
+                self.preview_optimizer.load_state_dict(state["preview_optimizer"])
+            except (ValueError, RuntimeError):
+                logger.warning(
+                    "Preview optimizer state incompatible with current model — "
+                    "using fresh optimizer (momentum/schedule will be reset)"
+                )
         self.total_battles = state.get("total_battles", 0)
         self.total_updates = state.get("total_updates", 0)
         self.wins = state.get("wins", 0)
         self.losses = state.get("losses", 0)
         if "battle_lr_scheduler" in state and self.battle_lr_scheduler is not None:
-            self.battle_lr_scheduler.load_state_dict(state["battle_lr_scheduler"])
+            try:
+                self.battle_lr_scheduler.load_state_dict(state["battle_lr_scheduler"])
+            except (ValueError, RuntimeError, KeyError):
+                logger.warning("Battle LR scheduler state incompatible — using fresh scheduler")
         if "preview_lr_scheduler" in state and self.preview_lr_scheduler is not None:
-            self.preview_lr_scheduler.load_state_dict(state["preview_lr_scheduler"])
+            try:
+                self.preview_lr_scheduler.load_state_dict(state["preview_lr_scheduler"])
+            except (ValueError, RuntimeError, KeyError):
+                logger.warning("Preview LR scheduler state incompatible — using fresh scheduler")
 
     def load_weights_only(self, state: dict):
         """Load only network weights (for frozen league opponents)."""
