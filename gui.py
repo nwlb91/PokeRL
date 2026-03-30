@@ -710,8 +710,10 @@ class PokeRLApp(tk.Tk):
         """Update the summary stat labels with latest values."""
         wr_str = ""
         if greedy_eval_results:
-            _, gwr = greedy_eval_results[-1]
-            wr_str = f"Greedy: {gwr:.1%}"
+            last = greedy_eval_results[-1]
+            gwr = last[1]
+            gwr2 = last[2] if len(last) == 3 else 1.0 - gwr
+            wr_str = f"Greedy: T1={gwr:.1%} T2={gwr2:.1%}"
         if baseline_eval_results_team1 and baseline_eval_results_team2:
             _, bwr1 = baseline_eval_results_team1[-1]
             _, bwr2 = baseline_eval_results_team2[-1]
@@ -785,12 +787,18 @@ class PokeRLApp(tk.Tk):
                 self.train_plateau_var.set("Learning")
                 self._plateau_label.configure(foreground="green")
 
-        # Overlay greedy eval win rate
+        # Overlay greedy eval win rate for both teams
         if greedy_eval_results and len(greedy_eval_results) > 0:
             ge_battles = [r[0] for r in greedy_eval_results]
-            ge_wrs = [r[1] for r in greedy_eval_results]
-            ax_wr.plot(ge_battles, ge_wrs, color="#ff7f0e", linewidth=1.5,
-                       marker="o", markersize=3, label="Greedy WR")
+            ge_wrs_t1 = [r[1] for r in greedy_eval_results]
+            ge_wrs_t2 = [
+                r[2] if len(r) == 3 else 1.0 - r[1]
+                for r in greedy_eval_results
+            ]
+            ax_wr.plot(ge_battles, ge_wrs_t1, color="#ff7f0e", linewidth=1.5,
+                       marker="o", markersize=3, label="Greedy T1")
+            ax_wr.plot(ge_battles, ge_wrs_t2, color="#9467bd", linewidth=1.5,
+                       marker="o", markersize=3, label="Greedy T2")
 
         # Overlay per-team baseline eval win rates
         if baseline_eval_results_team1 and len(baseline_eval_results_team1) > 0:

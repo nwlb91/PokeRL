@@ -108,7 +108,9 @@ class Trainer:
         self.greedy_eval_results: deque = deque(maxlen=5000)  # (battle_count, win_rate)
         self.train_wr_history: deque = deque(maxlen=5000)  # (battle_count, win_rate)
         self._latest_explained_variance: float = 0.0
-        self._latest_metrics: dict = {}  # most recent PPO metrics, updated each update
+        self._latest_explained_variance_agent2: float = 0.0
+        self._latest_metrics: dict = {}  # most recent PPO metrics for agent1
+        self._latest_metrics_agent2: dict = {}  # most recent PPO metrics for agent2
 
         # Training metrics history (sampled every 50 battles alongside win rate)
         self.metrics_history: deque = deque(maxlen=5000)  # each entry keyed by metric name
@@ -146,6 +148,10 @@ class Trainer:
         # Best-model tracking and regression protection
         self.best_eval_win_rate: float = 0.0
         self.regression_counter: int = 0
+
+        # Per-team best baseline eval WRs for independent best-model tracking
+        self._best_baseline_wr_team1: float = 0.0  # best agent1 WR vs baseline2
+        self._best_baseline_wr_team2: float = 0.0  # best agent2 WR vs baseline1
 
         # Plateau response: entropy bump (linear decay from start to until)
         self._entropy_bump_start: int = 0
@@ -379,7 +385,7 @@ class Trainer:
             logger.warning("Greedy eval: no battles completed")
             return None
         wr = wins / played
-        self.greedy_eval_results.append((self.battle_count, wr))
+        self.greedy_eval_results.append((self.battle_count, wr, 1.0 - wr))
         return wr
 
     async def _init_baselines(self):
@@ -583,11 +589,13 @@ class Trainer:
                     self.agent1, self.agent2,
                     self.league, self.wp_estimator,
                 )
-            # Restore per-team EMA win rates from checkpoint metadata
+            # Restore per-team EMA win rates and best baseline WRs from checkpoint metadata
             meta = self.ckpt_manager.get_latest_metadata()
             if meta is not None:
                 self._team1_wr_ema = meta.get("team1_wr_ema", 0.5)
                 self._team2_wr_ema = meta.get("team2_wr_ema", 0.5)
+                self._best_baseline_wr_team1 = meta.get("best_baseline_wr_team1", 0.0)
+                self._best_baseline_wr_team2 = meta.get("best_baseline_wr_team2", 0.0)
 
             # Restore RND state if available
             if self.rnd is not None:
@@ -691,15 +699,17 @@ class Trainer:
             await self._run_battle_batch(batch_size)
             self.battle_count += batch_size
 
-            # PPO updates when buffer is full enough
-            if len(self.agent1.battle_buffer) >= self.config.rollout_steps:
-                self._update_agents()
+            # PPO updates when each agent's buffer is full enough
+            for agent in (self.agent1, self.agent2):
+                if len(agent.battle_buffer) >= self.config.rollout_steps:
+                    self._update_single_battle_agent(agent)
 
             # Team preview updates on a separate (lower) threshold so lead
             # selection learns at a comparable rate despite producing only
             # one sample per game.
-            if len(self.agent1.preview_buffer) >= self.config.preview_rollout_steps:
-                self._update_preview()
+            for agent in (self.agent1, self.agent2):
+                if len(agent.preview_buffer) >= self.config.preview_rollout_steps:
+                    self._update_single_preview_agent(agent)
 
             # Periodic checkpoint + league snapshot
             if self.battle_count - self._last_checkpoint >= self.config.checkpoint_interval:
@@ -723,28 +733,33 @@ class Trainer:
                 else:
                     logger.info(
                         f"  Greedy eval at battle {self.battle_count}: "
-                        f"WR={greedy_wr:.1%} ({self.config.greedy_eval_battles} battles)"
+                        f"T1={greedy_wr:.1%} T2={1-greedy_wr:.1%} "
+                        f"({self.config.greedy_eval_battles} battles)"
                     )
 
-                # Best-model tracking: save when we hit a new high
+                # Best-model tracking: use symmetric metric so that
+                # improvement by either agent counts as progress, and
+                # one agent dominating doesn't count as "best".
                 if greedy_wr is not None and self.config.best_model_tracking:
-                    if greedy_wr > self.best_eval_win_rate:
-                        self.best_eval_win_rate = greedy_wr
+                    symmetric_wr = min(greedy_wr, 1.0 - greedy_wr)
+                    if symmetric_wr > self.best_eval_win_rate:
+                        self.best_eval_win_rate = symmetric_wr
                         self.regression_counter = 0
                         self.ckpt_manager.save_best(
                             self.agent1, self.agent2,
                             self.league, self.wp_estimator,
-                            self.battle_count, greedy_wr,
+                            self.battle_count, symmetric_wr,
                         )
                         logger.info(
-                            f"  New best model saved (greedy WR={greedy_wr:.1%}) "
+                            f"  New best model saved (symmetric WR={symmetric_wr:.1%}, "
+                            f"T1={greedy_wr:.1%} T2={1-greedy_wr:.1%}) "
                             f"at battle {self.battle_count}"
                         )
                     elif self.config.regression_rollback_enabled:
-                        if greedy_wr < self.best_eval_win_rate - self.config.regression_threshold:
+                        if symmetric_wr < self.best_eval_win_rate - self.config.regression_threshold:
                             self.regression_counter += 1
                             logger.warning(
-                                f"Regression detected: greedy WR={greedy_wr:.1%} vs "
+                                f"Regression detected: symmetric WR={symmetric_wr:.1%} vs "
                                 f"best={self.best_eval_win_rate:.1%} "
                                 f"(counter={self.regression_counter}/"
                                 f"{self.config.regression_eval_window})"
@@ -781,6 +796,30 @@ class Trainer:
                                 f"(promotions: {self._baseline1_promotions}/{self._baseline2_promotions})"
                             )
                             await self._maybe_promote_baselines(wr1, wr2)
+
+                            # Per-team best tracking: save each team's
+                            # best agent independently when it achieves
+                            # a new high vs the opposing baseline.
+                            if wr1 > self._best_baseline_wr_team1:
+                                prev1 = self._best_baseline_wr_team1
+                                self._best_baseline_wr_team1 = wr1
+                                self.ckpt_manager.save_best_team(
+                                    self.agent1, 0, self.battle_count, wr1,
+                                )
+                                logger.info(
+                                    f"  New best team1 agent saved "
+                                    f"(BL WR={wr1:.1%}, prev best={prev1:.1%})"
+                                )
+                            if wr2 > self._best_baseline_wr_team2:
+                                prev2 = self._best_baseline_wr_team2
+                                self._best_baseline_wr_team2 = wr2
+                                self.ckpt_manager.save_best_team(
+                                    self.agent2, 1, self.battle_count, wr2,
+                                )
+                                logger.info(
+                                    f"  New best team2 agent saved "
+                                    f"(BL WR={wr2:.1%}, prev best={prev2:.1%})"
+                                )
                         else:
                             logger.warning("Baseline eval: some battles did not complete, skipping")
 
@@ -789,15 +828,20 @@ class Trainer:
                 self._last_stats_log = self.battle_count
                 self._log_stats()
 
-                # Feed chosen metric to the plateau detector
+                # Feed chosen metric to the plateau detector.
+                # Use symmetric metrics so stalls in either agent are detected.
                 wr = self._recent_win_rate()
                 if (self.config.plateau_metric == "greedy_wr"
                         and self.greedy_eval_results):
-                    metric_val = self.greedy_eval_results[-1][1]
+                    last_greedy_wr = self.greedy_eval_results[-1][1]
+                    metric_val = min(last_greedy_wr, 1.0 - last_greedy_wr)
                 elif self.config.plateau_metric == "explained_variance":
-                    metric_val = self._latest_explained_variance
+                    metric_val = min(
+                        self._latest_explained_variance,
+                        self._latest_explained_variance_agent2,
+                    )
                 else:
-                    metric_val = wr
+                    metric_val = min(wr, 1.0 - wr)
                 plateau_info = self.plateau_detector.update(
                     metric_val, self.battle_count
                 )
@@ -1091,64 +1135,76 @@ class Trainer:
                 if param.requires_grad:
                     param.data.add_(torch.randn_like(param.data) * noise_scale)
 
-    def _update_agents(self):
-        """Run PPO updates for both agents."""
-        self.agent1.set_train()
-        self.agent2.set_train()
+    def _update_single_battle_agent(self, agent: PPOAgent):
+        """Run PPO update for a single agent's battle policy.
+
+        Each agent updates independently when its own buffer is full,
+        ensuring consistent sample counts regardless of the other agent's
+        buffer state.
+        """
+        agent.set_train()
 
         ent_coef = self._get_effective_entropy_coef()
+        metrics = agent.update_battle_policy(entropy_coef_override=ent_coef)
 
-        metrics1 = self.agent1.update_battle_policy(entropy_coef_override=ent_coef)
-        metrics2 = self.agent2.update_battle_policy(entropy_coef_override=ent_coef)
-
-        # Step LR schedulers (agent2 uses inverted metric since wr is from team1's perspective)
+        # Step LR scheduler (agent2 uses inverted metric since wr is from team1's perspective)
         wr = self._recent_win_rate()
-        self.agent1.step_lr_scheduler(metric=wr)
-        self.agent2.step_lr_scheduler(metric=1.0 - wr)
+        if agent is self.agent1:
+            agent.step_lr_scheduler(metric=wr)
+        else:
+            agent.step_lr_scheduler(metric=1.0 - wr)
 
-        if metrics1:
-            self._latest_explained_variance = metrics1.get(
-                'explained_variance', 0.0
-            )
-            self._latest_metrics = {
-                'policy_loss': metrics1.get('policy_loss', 0.0),
-                'value_loss': metrics1.get('value_loss', 0.0),
-                'entropy': metrics1.get('entropy', 0.0),
-                'explained_variance': metrics1.get('explained_variance', 0.0),
-                'mean_episode_return': metrics1.get('mean_episode_return', 0.0),
-            }
+        if metrics:
+            label = "Agent1" if agent is self.agent1 else "Agent2"
+
+            # Store metrics for the appropriate agent
+            if agent is self.agent1:
+                self._latest_explained_variance = metrics.get(
+                    'explained_variance', 0.0
+                )
+                self._latest_metrics = {
+                    'policy_loss': metrics.get('policy_loss', 0.0),
+                    'value_loss': metrics.get('value_loss', 0.0),
+                    'entropy': metrics.get('entropy', 0.0),
+                    'explained_variance': metrics.get('explained_variance', 0.0),
+                    'mean_episode_return': metrics.get('mean_episode_return', 0.0),
+                }
+            else:
+                self._latest_explained_variance_agent2 = metrics.get(
+                    'explained_variance', 0.0
+                )
+                self._latest_metrics_agent2 = {
+                    'policy_loss': metrics.get('policy_loss', 0.0),
+                    'value_loss': metrics.get('value_loss', 0.0),
+                    'entropy': metrics.get('entropy', 0.0),
+                    'explained_variance': metrics.get('explained_variance', 0.0),
+                    'mean_episode_return': metrics.get('mean_episode_return', 0.0),
+                }
+
             msg = (
-                f"  Agent1 battle update: "
-                f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
-                f"value_loss={metrics1.get('value_loss', 0):.4f}, "
-                f"entropy={metrics1.get('entropy', 0):.4f}, "
-                f"explained_var={metrics1.get('explained_variance', 0):.4f}, "
-                f"mean_ep_return={metrics1.get('mean_episode_return', 0):.4f}"
+                f"  {label} battle update: "
+                f"policy_loss={metrics.get('policy_loss', 0):.4f}, "
+                f"value_loss={metrics.get('value_loss', 0):.4f}, "
+                f"entropy={metrics.get('entropy', 0):.4f}, "
+                f"explained_var={metrics.get('explained_variance', 0):.4f}, "
+                f"mean_ep_return={metrics.get('mean_episode_return', 0):.4f}"
             )
-            if 'mean_uncertainty' in metrics1:
-                msg += f", uncertainty={metrics1['mean_uncertainty']:.4f}"
-            logger.debug(msg)
-        if metrics2:
-            msg = (
-                f"  Agent2 battle update: "
-                f"policy_loss={metrics2.get('policy_loss', 0):.4f}, "
-                f"value_loss={metrics2.get('value_loss', 0):.4f}, "
-                f"entropy={metrics2.get('entropy', 0):.4f}, "
-                f"explained_var={metrics2.get('explained_variance', 0):.4f}, "
-                f"mean_ep_return={metrics2.get('mean_episode_return', 0):.4f}"
-            )
-            if 'mean_uncertainty' in metrics2:
-                msg += f", uncertainty={metrics2['mean_uncertainty']:.4f}"
+            if 'mean_uncertainty' in metrics:
+                msg += f", uncertainty={metrics['mean_uncertainty']:.4f}"
             logger.debug(msg)
 
         # Train RND predictor on collected observations
         if self.rnd is not None and len(self._rnd_observations) > 0:
             rnd_loss = self.rnd.train_predictor(self._rnd_observations)
             rnd_coef = self._get_effective_rnd_coef()
-            self._latest_metrics['rnd_loss'] = rnd_loss
-            self._latest_metrics['rnd_coef'] = rnd_coef
-            self._latest_metrics['rnd_reward_mean'] = self.rnd.reward_stats.mean
-            self._latest_metrics['rnd_novelty_mean'] = self.rnd.novelty_stats.mean
+            rnd_metrics = {
+                'rnd_loss': rnd_loss,
+                'rnd_coef': rnd_coef,
+                'rnd_reward_mean': self.rnd.reward_stats.mean,
+                'rnd_novelty_mean': self.rnd.novelty_stats.mean,
+            }
+            self._latest_metrics.update(rnd_metrics)
+            self._latest_metrics_agent2.update(rnd_metrics)
             logger.debug(
                 "  RND update: loss=%.4f, coef=%.4f, reward_mean=%.4f, "
                 "novelty_mean=%.4f",
@@ -1157,18 +1213,14 @@ class Trainer:
             )
             self._rnd_observations.clear()
 
-    def _update_preview(self):
-        """Run PPO updates for both agents' team preview policies.
+    def _update_single_preview_agent(self, agent: PPOAgent):
+        """Run PPO update for a single agent's team preview policy.
 
         Uses separate rollout threshold and more PPO epochs to compensate
         for the much sparser data (1 step per game vs ~20-40 for battle).
         """
         ent_coef = self._get_effective_entropy_coef()
-        self.agent1.update_preview_policy(
-            entropy_coef_override=ent_coef,
-            ppo_epochs_override=self.config.preview_ppo_epochs,
-        )
-        self.agent2.update_preview_policy(
+        agent.update_preview_policy(
             entropy_coef_override=ent_coef,
             ppo_epochs_override=self.config.preview_ppo_epochs,
         )
@@ -1188,6 +1240,7 @@ class Trainer:
                     if self.greedy_eval_results else None
                 ),
                 "explained_variance": self._latest_explained_variance,
+                "explained_variance_agent2": self._latest_explained_variance_agent2,
                 "agent1_wins": self.agent1.wins,
                 "agent2_wins": self.agent2.wins,
                 "baseline_wr_team1": (
@@ -1202,6 +1255,8 @@ class Trainer:
                 "baseline_promotions_team2": self._baseline2_promotions,
                 "team1_wr_ema": self._team1_wr_ema,
                 "team2_wr_ema": self._team2_wr_ema,
+                "best_baseline_wr_team1": self._best_baseline_wr_team1,
+                "best_baseline_wr_team2": self._best_baseline_wr_team2,
             },
         )
 
@@ -1260,8 +1315,13 @@ class Trainer:
         wr = self._recent_win_rate()
         greedy_str = ""
         if self.greedy_eval_results:
-            _, last_greedy_wr = self.greedy_eval_results[-1]
-            greedy_str = f" | Greedy WR: {last_greedy_wr:.1%}"
+            last_entry = self.greedy_eval_results[-1]
+            if len(last_entry) == 3:
+                _, last_greedy_wr, last_greedy_wr2 = last_entry
+            else:
+                _, last_greedy_wr = last_entry
+                last_greedy_wr2 = 1.0 - last_greedy_wr
+            greedy_str = f" | Greedy: T1={last_greedy_wr:.1%} T2={last_greedy_wr2:.1%}"
         if self.baseline_eval_results_team1:
             _, bl1 = self.baseline_eval_results_team1[-1]
             _, bl2 = self.baseline_eval_results_team2[-1]
@@ -1274,11 +1334,16 @@ class Trainer:
         self.train_wr_history.append((self.battle_count, wr))
 
         # Snapshot latest PPO metrics at the same rate as win rate logging
-        if self._latest_metrics:
-            self.metrics_history.append({
-                'battle_count': self.battle_count,
-                **self._latest_metrics,
-            })
+        if self._latest_metrics or self._latest_metrics_agent2:
+            entry = {'battle_count': self.battle_count}
+            if self._latest_metrics:
+                entry.update(self._latest_metrics)
+            if self._latest_metrics_agent2:
+                entry.update({
+                    f"agent2_{k}": v
+                    for k, v in self._latest_metrics_agent2.items()
+                })
+            self.metrics_history.append(entry)
 
         # Matchup-aware reward scaling info
         matchup_str = ""
@@ -1289,7 +1354,7 @@ class Trainer:
 
         logger.info(
             f"Battle {self.battle_count}/{self.config.total_battles} | "
-            f"Team1 recent WR: {wr:.1%}{greedy_str}{matchup_str} | "
+            f"Recent WR: T1={wr:.1%} T2={1-wr:.1%}{greedy_str}{matchup_str} | "
             f"Agent1: {self.agent1.wins}W/{self.agent1.losses}L | "
             f"Agent2: {self.agent2.wins}W/{self.agent2.losses}L | "
             f"League: {len(self.league.agents)} agents"
