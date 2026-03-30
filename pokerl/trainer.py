@@ -1073,10 +1073,10 @@ class Trainer:
         if self.rnd is not None and len(observations) > 0:
             intrinsic = self.rnd.compute_intrinsic_rewards(observations)
             rnd_coef = self._get_effective_rnd_coef()
-            # intrinsic has one value per observation; pending steps correspond
-            # to transitions (obs[i] -> obs[i+1]), so use observations[:-1]
+            # intrinsic has one value per observation; pending_steps[i] corresponds
+            # to the transition from obs[i] to obs[i+1]. Assign intrinsic[i] to step[i].
             for j, step in enumerate(pending):
-                if j < len(intrinsic) - 1:
+                if j < len(intrinsic):
                     step.reward += rnd_coef * intrinsic[j]
 
             # Collect observations for RND predictor training
