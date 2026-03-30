@@ -55,6 +55,7 @@ class Scoreboard:
             checkpoint_path=checkpoint_path,
         )
         self.entries = [entry]
+        self._append_add_record(name, battle_count)
         logger.info(
             "Scoreboard team%d: initial entry '%s' added at rating 1000",
             self.team_id + 1, name,
@@ -188,6 +189,7 @@ class Scoreboard:
         )
         self.entries.append(entry)
         self._update_ratings()
+        self._append_add_record(name, battle_count)
         logger.info(
             "Scoreboard team%d: '%s' added (rating=%.1f, games_trained=%d, "
             "leaderboard_size=%d)",
@@ -213,16 +215,32 @@ class Scoreboard:
         with open(self.match_log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
+    def _append_add_record(self, name: str, battle_count: int) -> None:
+        """Append a leaderboard admission event to the JSONL log file."""
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        record = {"type": "add", "name": name, "battle_count": battle_count}
+        with open(self.match_log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
     def load_from_log(self) -> bool:
         """Reconstruct matches and leaderboard from the JSONL log file.
 
         Returns True if data was loaded, False if no log exists.
+
+        Match records (no "type" key) are loaded into ``self.matches``.
+        Admission records (``"type": "add"``) are used to reconstruct
+        ``self.entries`` directly, avoiding the need to replay rating-based
+        admission decisions (which break with cross-evaluation data).
+
+        For backward compatibility with old logs that lack "add" records,
+        falls back to treating all non-opponent player names as entries.
         """
         if not self.match_log_path.exists():
             return False
 
         self.matches.clear()
-        players_seen: List[str] = []  # ordered by first appearance
+        admitted: List[str] = []  # names from explicit "add" records
+        has_add_records = False
 
         with open(self.match_log_path) as f:
             for line in f:
@@ -230,37 +248,40 @@ class Scoreboard:
                 if not line:
                     continue
                 record = json.loads(line)
-                a = record["a"]
-                b = record["b"]
-                a_won = record["winner"] == "a"
-                self._record_match_no_log(a, b, a_won)
-                if a not in players_seen:
-                    players_seen.append(a)
-                if b not in players_seen:
-                    players_seen.append(b)
+                if record.get("type") == "add":
+                    has_add_records = True
+                    name = record["name"]
+                    if name not in admitted:
+                        admitted.append(name)
+                else:
+                    a = record["a"]
+                    b = record["b"]
+                    a_won = record["winner"] == "a"
+                    self._record_match_no_log(a, b, a_won)
 
-        if not players_seen:
+        if not has_add_records:
+            # Legacy log without admission records — fall back to
+            # treating all non-opponent player_a names as entries.
+            players_seen: List[str] = []
+            for (a, b) in self.matches:
+                if a not in players_seen and not a.startswith("opp:"):
+                    players_seen.append(a)
+            admitted = players_seen
+
+        if not admitted:
             return False
 
-        # Reconstruct leaderboard entries from checkpoint directory
-        # The first player seen is always the initial entry
+        # Build entries from admitted names
         self.entries = []
-        for name in players_seen:
-            # Try to find the checkpoint
-            ckpt_path = self._find_checkpoint(name)
-            entry = ScoreboardEntry(
+        for name in admitted:
+            self.entries.append(ScoreboardEntry(
                 name=name,
                 battle_count=self._extract_battle_count(name),
-                checkpoint_path=ckpt_path,
-            )
-            self.entries.append(entry)
+                checkpoint_path=self._find_checkpoint(name),
+            ))
 
-        # Now determine which entries actually belong on the leaderboard
-        # by replaying the "add only if strongest" logic.
-        # Exclude "opp:" prefixed names — those are cross-team opponents
-        # that participate in the BT model but aren't leaderboard candidates.
-        leaderboard_candidates = [n for n in players_seen if not n.startswith("opp:")]
-        self._rebuild_leaderboard(leaderboard_candidates)
+        # Compute ratings from all accumulated match data
+        self._update_ratings()
 
         logger.info(
             "Scoreboard team%d: loaded %d entries from log (%d total matches)",
@@ -268,55 +289,6 @@ class Scoreboard:
             sum(a + b for a, b in self.matches.values()),
         )
         return True
-
-    def _rebuild_leaderboard(self, players_seen: List[str]) -> None:
-        """Rebuild the leaderboard by replaying entry decisions.
-
-        Walk through players in order. The first is always added. Each
-        subsequent player is added only if its rating exceeds all current
-        entries at that point.
-        """
-        if not players_seen:
-            return
-
-        candidates = list(players_seen)
-        if not candidates:
-            return
-
-        # Start with just the first entry
-        self.entries = [ScoreboardEntry(
-            name=candidates[0],
-            battle_count=self._extract_battle_count(candidates[0]),
-            rating=1000.0,
-            checkpoint_path=self._find_checkpoint(candidates[0]),
-        )]
-
-        for name in candidates[1:]:
-            # Temporarily add to compute rating
-            test_entry = ScoreboardEntry(
-                name=name,
-                battle_count=self._extract_battle_count(name),
-                checkpoint_path=self._find_checkpoint(name),
-            )
-            self.entries.append(test_entry)
-            ratings = self.compute_ratings()
-
-            candidate_rating = ratings.get(name, 0.0)
-            max_existing = max(
-                ratings.get(e.name, 0.0)
-                for e in self.entries if e.name != name
-            )
-
-            if candidate_rating > max_existing:
-                # Keep it — update all ratings
-                for e in self.entries:
-                    if e.name in ratings:
-                        e.rating = ratings[e.name]
-                if self.entries:
-                    self.entries[0].rating = 1000.0
-            else:
-                # Remove it
-                self.entries = [e for e in self.entries if e.name != name]
 
     def _find_checkpoint(self, name: str) -> str:
         """Find checkpoint path for a given entry name."""

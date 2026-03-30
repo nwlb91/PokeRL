@@ -143,11 +143,13 @@ class TestJSONLPersistence:
 
         assert sb.matches[("A", "B")] == [2, 1]
 
-        # Verify file contents
+        # Verify file contents (1 add record + 3 match records)
         lines = sb.match_log_path.read_text().strip().split("\n")
-        assert len(lines) == 3
+        assert len(lines) == 4
         first = json.loads(lines[0])
-        assert first == {"a": "A", "b": "B", "winner": "a"}
+        assert first == {"type": "add", "name": "A", "battle_count": 0}
+        second = json.loads(lines[1])
+        assert second == {"a": "A", "b": "B", "winner": "a"}
 
     def test_load_from_log_reconstructs(self, tmp_path):
         # Create a log file manually
