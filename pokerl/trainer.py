@@ -25,7 +25,7 @@ from poke_env.ps_client.server_configuration import (
 )
 
 from pokerl.agent import PPOAgent
-from pokerl.checkpoint import CheckpointManager
+from pokerl.checkpoint import CheckpointManager, _config_to_dict
 from pokerl.config import Config
 from pokerl.env import CompletedEpisode, RLPlayer, create_player, load_team
 from pokerl.league import League
@@ -641,6 +641,7 @@ class Trainer:
         elo_state = {
             "agent1": self.agent1.get_state_dict(),
             "agent2": self.agent2.get_state_dict(),
+            "config": _config_to_dict(self.config),
         }
         _torch.save(elo_state, elo_ckpt_path)
 
@@ -902,7 +903,8 @@ class Trainer:
             if not initial_path.exists():
                 _torch.save(
                     {"agent1": self.agent1.get_state_dict(),
-                     "agent2": self.agent2.get_state_dict()},
+                     "agent2": self.agent2.get_state_dict(),
+                     "config": _config_to_dict(self.config)},
                     initial_path,
                 )
             self.scoreboard_team1.add_initial(

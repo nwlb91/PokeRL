@@ -1405,8 +1405,12 @@ class PokeRLApp(tk.Tk):
                 state = torch.load(ckpt_path, **_TORCH_LOAD_KWARGS)
 
                 # Restore architecture config from checkpoint when available,
-                # falling back to defaults for older checkpoints.
-                saved_cfg = state.get("config", {})
+                # falling back to inference from weight shapes for older
+                # checkpoints that lack a config key.
+                saved_cfg = state.get("config") or {}
+                if not saved_cfg:
+                    from pokerl.checkpoint import infer_config_from_weights
+                    saved_cfg = infer_config_from_weights(state)
                 config = Config(
                     battle_format=battle_format,
                     device="cpu",

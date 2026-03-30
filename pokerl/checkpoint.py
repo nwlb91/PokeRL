@@ -20,11 +20,58 @@ _TORCH_LOAD_KWARGS = {"map_location": "cpu", "weights_only": False}
 
 from pokerl.agent import PPOAgent
 from pokerl.config import Config
+from pokerl.features import BATTLE_OBS_SIZE_EXTENDED
 from pokerl.league import League
 from pokerl.win_probability import WinProbabilityEstimator
 
 logger = logging.getLogger(__name__)
 
+
+
+def infer_config_from_weights(state: dict) -> dict:
+    """Infer architecture config from checkpoint weight shapes.
+
+    Used as a fallback when the checkpoint lacks a 'config' key (e.g. older
+    Elo checkpoints).  Examines the first available agent state dict to
+    determine hidden_size, team_sheet_obs, use_lstm, and q_head_enabled.
+    """
+    # Find an agent state dict inside the checkpoint
+    agent_state = None
+    for key in ("agent", "agent1", "agent2"):
+        if key in state and isinstance(state[key], dict) and "battle_net" in state[key]:
+            agent_state = state[key]
+            break
+
+    if agent_state is None:
+        return {}
+
+    battle_net = agent_state["battle_net"]
+    inferred: dict = {}
+
+    # backbone.net.0.weight has shape [hidden_size, obs_size]
+    first_weight = battle_net.get("backbone.net.0.weight")
+    if first_weight is not None:
+        inferred["hidden_size"] = first_weight.shape[0]
+        inferred["team_sheet_obs"] = first_weight.shape[1] == BATTLE_OBS_SIZE_EXTENDED
+
+    # LSTM presence
+    inferred["use_lstm"] = "lstm.weight_ih_l0" in battle_net
+
+    # Q-head presence
+    inferred["q_head_enabled"] = any(
+        k.startswith("q_head.") for k in battle_net
+    )
+
+    # Count backbone layers: keys like backbone.net.{i}.weight where i % 3 == 0
+    layer_indices = [
+        int(k.split(".")[2])
+        for k in battle_net
+        if k.startswith("backbone.net.") and k.endswith(".weight")
+    ]
+    if layer_indices:
+        inferred["num_layers"] = sum(1 for i in layer_indices if i % 3 == 0)
+
+    return inferred
 
 
 def _config_to_dict(config: Config) -> dict:
