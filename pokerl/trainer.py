@@ -626,10 +626,12 @@ class Trainer:
         return self._elo_opponent_player
 
     async def _run_elo_evaluation(self):
-        """Evaluate the current model against all scoreboard entries.
+        """Cross-evaluate all team1 scoreboard entries vs all team2 entries.
 
-        For team1 scoreboard: current agent1 (team1) vs checkpoint agent2 (team2).
-        For team2 scoreboard: current agent2 (team2) vs checkpoint agent1 (team1).
+        Each (team1_entry, team2_entry) pair plays n_games.  Results are
+        recorded in both scoreboards (inverted for team2).  Only pairs
+        that haven't yet accumulated enough games are played, so existing
+        match data from prior evaluations is reused.
         """
         import torch as _torch
 
@@ -642,89 +644,110 @@ class Trainer:
         }
         _torch.save(elo_state, elo_ckpt_path)
 
+        # Save current weights so we can restore after swapping
+        saved_agent1_state = self.agent1.get_state_dict()
+        saved_agent2_state = self.agent2.get_state_dict()
+
         self.agent1.set_eval()
         self.agent2.set_eval()
 
-        # --- Team1 scoreboard: current agent1 vs checkpoint agent2 ---
-        for entry in self.scoreboard_team1.entries:
-            ckpt = _torch.load(
-                entry.checkpoint_path, map_location="cpu", weights_only=False,
-            )
-            # Load checkpoint's agent2 as the opponent (team2 side)
-            agent2_state = ckpt.get("agent2", ckpt.get("agent", {}))
-            opp_player = await self._get_elo_opponent_player(agent2_state, team_id=1)
+        # Build candidate lists: existing leaderboard entries + current checkpoint
+        t1_candidates = [(e.name, e.checkpoint_path) for e in self.scoreboard_team1.entries]
+        t1_candidates.append((elo_ckpt_name, str(elo_ckpt_path)))
 
-            eval_player1 = self._get_or_create_eval_player1()
-            wins_before = eval_player1.n_won_battles
-            total_before = eval_player1.n_finished_battles
+        t2_candidates = [(e.name, e.checkpoint_path) for e in self.scoreboard_team2.entries]
+        t2_candidates.append((elo_ckpt_name, str(elo_ckpt_path)))
 
-            try:
-                await asyncio.wait_for(
-                    eval_player1.battle_against(opp_player, n_battles=n_games),
-                    timeout=self.config.battle_timeout,
+        # Cache loaded checkpoints to avoid redundant disk reads
+        ckpt_cache: dict = {}
+
+        def _load_ckpt(path: str) -> dict:
+            if path not in ckpt_cache:
+                ckpt_cache[path] = _torch.load(
+                    path, map_location="cpu", weights_only=False,
                 )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "Elo eval timed out: current team1 vs %s", entry.name
-                )
+            return ckpt_cache[path]
 
-            total_played = eval_player1.n_finished_battles - total_before
-            wins = eval_player1.n_won_battles - wins_before
+        # Play every (team1, team2) pair, recording in both scoreboards
+        for t1_name, t1_path in t1_candidates:
+            if not t1_path:
+                continue
+            for t2_name, t2_path in t2_candidates:
+                if not t2_path:
+                    continue
 
-            for _ in range(wins):
-                self.scoreboard_team1.record_match(
-                    elo_ckpt_name, entry.name, a_won=True
-                )
-            for _ in range(total_played - wins):
-                self.scoreboard_team1.record_match(
-                    elo_ckpt_name, entry.name, a_won=False
-                )
+                # Skip pairs that already have enough match data
+                t1_key = (t1_name, t2_name)
+                t1_played = sum(self.scoreboard_team1.matches.get(t1_key, [0, 0]))
+                t2_key = (t2_name, t1_name)
+                t2_played = sum(self.scoreboard_team2.matches.get(t2_key, [0, 0]))
+                already_played = max(t1_played, t2_played)
+                if already_played >= n_games:
+                    continue
 
-            logger.info(
-                "Elo eval team1: current vs '%s' = %d/%d wins",
-                entry.name, wins, total_played,
-            )
+                games_needed = n_games - already_played
 
-        # --- Team2 scoreboard: current agent2 vs checkpoint agent1 ---
-        for entry in self.scoreboard_team2.entries:
-            ckpt = _torch.load(
-                entry.checkpoint_path, map_location="cpu", weights_only=False,
-            )
-            # Load checkpoint's agent1 as the opponent (team1 side)
-            agent1_state = ckpt.get("agent1", ckpt.get("agent", {}))
-            opp_player = await self._get_elo_opponent_player(agent1_state, team_id=0)
+                # Load team1 entry's agent1 weights into eval player
+                t1_ckpt = _load_ckpt(t1_path)
+                agent1_state = t1_ckpt.get("agent1", t1_ckpt.get("agent", {}))
+                self.agent1.load_weights_only(agent1_state)
+                self.agent1.set_eval()
 
-            eval_player2 = self._get_or_create_eval_player2()
-            wins_before = eval_player2.n_won_battles
-            total_before = eval_player2.n_finished_battles
-
-            try:
-                await asyncio.wait_for(
-                    eval_player2.battle_against(opp_player, n_battles=n_games),
-                    timeout=self.config.battle_timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "Elo eval timed out: current team2 vs %s", entry.name
+                # Load team2 entry's agent2 weights into opponent player
+                t2_ckpt = _load_ckpt(t2_path)
+                agent2_state = t2_ckpt.get("agent2", t2_ckpt.get("agent", {}))
+                opp_player = await self._get_elo_opponent_player(
+                    agent2_state, team_id=1,
                 )
 
-            total_played = eval_player2.n_finished_battles - total_before
-            wins = eval_player2.n_won_battles - wins_before
+                eval_player1 = self._get_or_create_eval_player1()
+                wins_before = eval_player1.n_won_battles
+                total_before = eval_player1.n_finished_battles
 
-            for _ in range(wins):
-                self.scoreboard_team2.record_match(
-                    elo_ckpt_name, entry.name, a_won=True
+                try:
+                    await asyncio.wait_for(
+                        eval_player1.battle_against(
+                            opp_player, n_battles=games_needed,
+                        ),
+                        timeout=self.config.battle_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Elo eval timed out: %s vs %s", t1_name, t2_name,
+                    )
+
+                total_played = eval_player1.n_finished_battles - total_before
+                wins = eval_player1.n_won_battles - wins_before
+                losses = total_played - wins
+
+                # Record in team1 scoreboard (team1 player vs team2 opponent)
+                for _ in range(wins):
+                    self.scoreboard_team1.record_match(
+                        t1_name, t2_name, a_won=True,
+                    )
+                for _ in range(losses):
+                    self.scoreboard_team1.record_match(
+                        t1_name, t2_name, a_won=False,
+                    )
+
+                # Record in team2 scoreboard (team2 player vs team1 opponent)
+                for _ in range(losses):
+                    self.scoreboard_team2.record_match(
+                        t2_name, t1_name, a_won=True,
+                    )
+                for _ in range(wins):
+                    self.scoreboard_team2.record_match(
+                        t2_name, t1_name, a_won=False,
+                    )
+
+                logger.info(
+                    "Elo eval: '%s' (t1) vs '%s' (t2) = %d/%d t1 wins",
+                    t1_name, t2_name, wins, total_played,
                 )
-            for _ in range(total_played - wins):
-                self.scoreboard_team2.record_match(
-                    elo_ckpt_name, entry.name, a_won=False
-                )
 
-            logger.info(
-                "Elo eval team2: current vs '%s' = %d/%d wins",
-                entry.name, wins, total_played,
-            )
-
+        # Restore original weights
+        self.agent1.load_weights_only(saved_agent1_state)
+        self.agent2.load_weights_only(saved_agent2_state)
         self.agent1.set_train()
         self.agent2.set_train()
 
@@ -904,14 +927,16 @@ class Trainer:
             await self._run_battle_batch(batch_size)
             self.battle_count += batch_size
 
-            # PPO updates when buffer is full enough
-            if len(self.agent1.battle_buffer) >= self.config.rollout_steps:
+            # PPO updates when either agent's buffer is full enough
+            if (len(self.agent1.battle_buffer) >= self.config.rollout_steps
+                    or len(self.agent2.battle_buffer) >= self.config.rollout_steps):
                 self._update_agents()
 
             # Team preview updates on a separate (lower) threshold so lead
             # selection learns at a comparable rate despite producing only
             # one sample per game.
-            if len(self.agent1.preview_buffer) >= self.config.preview_rollout_steps:
+            if (len(self.agent1.preview_buffer) >= self.config.preview_rollout_steps
+                    or len(self.agent2.preview_buffer) >= self.config.preview_rollout_steps):
                 self._update_preview()
 
             # Periodic checkpoint + league snapshot

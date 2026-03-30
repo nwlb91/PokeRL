@@ -96,14 +96,15 @@ class Scoreboard:
         if len(names) <= 1:
             return {names[0]: 1000.0} if names else {}
 
-        # Collect all player names that appear in match data
+        # Collect all player names that appear in match data.
+        # Include opponents (from the other team's scoreboard) so that
+        # cross-team match results contribute to the BT model.
         all_players = set(names)
         for (a, b) in self.matches:
             all_players.add(a)
             all_players.add(b)
 
-        # Only rate players that are on the leaderboard
-        players = [n for n in all_players if n in set(names)]
+        players = list(all_players)
         if not players:
             return {}
 
