@@ -24,8 +24,8 @@ Implements a simplified version of AlphaStar's league training:
    agents) — unless a stale agent uniquely exploits another league member.
 
 Opponent selection distribution per battle:
-  - main_agent_fraction: play against the other team's latest (live) agent
-  - pfsp_fraction: play against a PFSP-selected historical opponent
+  - pfsp_fraction: probability of playing a PFSP-selected frozen league opponent
+  - remaining: play against the live opponent (current weights)
 """
 
 import logging
@@ -354,12 +354,11 @@ class League:
     def select_opponent(
         self, current_agent_id: str, current_team_id: int
     ) -> Optional[Tuple[LeagueAgent, str]]:
-        """Select a league opponent using the mixed strategy.
+        """Select a league opponent using PFSP with configured probability.
 
         Returns:
-            A (LeagueAgent, selection_type) tuple, where selection_type is one
-            of "main" or "pfsp".  Returns None if no opposing-team agents
-            exist in the league.
+            A (LeagueAgent, "pfsp") tuple if a league opponent is selected,
+            or None to signal the caller to use the live opponent instead.
         """
         opponent_team_id = 1 - current_team_id
         opponents = [a for a in self.agents if a.team_id == opponent_team_id]
@@ -367,17 +366,14 @@ class League:
         if not opponents:
             return None
 
-        roll = random.random()
+        # Use a frozen league opponent with probability pfsp_fraction,
+        # otherwise return None to fall back to the live opponent.
+        if random.random() >= self.config.pfsp_fraction:
+            return None
 
-        if roll < self.config.main_agent_fraction:
-            selected = opponents[-1]
-            kind = "main"
-        else:
-            selected = self._pfsp_select(current_agent_id, opponents)
-            kind = "pfsp"
-
+        selected = self._pfsp_select(current_agent_id, opponents)
         selected.selection_count += 1
-        return selected, kind
+        return selected, "pfsp"
 
     def _pfsp_select(
         self, current_agent_id: str, opponents: List[LeagueAgent]

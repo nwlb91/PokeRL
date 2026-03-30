@@ -81,5 +81,5 @@ class TestConfigValidation:
         assert config.entropy_coef == 0.0
 
     def test_fractions_out_of_range(self):
-        with pytest.raises(ValueError, match="main_agent_fraction"):
-            Config(main_agent_fraction=1.5)
+        with pytest.raises(ValueError, match="pfsp_fraction"):
+            Config(pfsp_fraction=1.5)

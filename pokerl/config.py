@@ -88,9 +88,7 @@ class Config:
     league_size: int = 20  # max agents in the league
     checkpoint_interval: int = 50  # battles between checkpoints
     pfsp_temperature: float = 0.1  # temperature for PFSP opponent sampling
-    main_agent_fraction: float = 0.5  # fraction of games vs latest opponent
-    pfsp_fraction: float = 0.35  # fraction of games via PFSP
-    self_play_fraction: float = 0.15  # fraction of self-play games
+    pfsp_fraction: float = 0.35  # fraction of games vs frozen league opponents (rest are live)
 
     # --- League admission & pruning ---
     league_min_size: int = 4  # min agents before admission gate activates
@@ -171,9 +169,7 @@ class Config:
         _check_positive("num_layers", self.num_layers)
         _check_positive("total_battles", self.total_battles)
         _check_positive("battle_timeout", self.battle_timeout)
-        _check_range("main_agent_fraction", self.main_agent_fraction, 0.0, 1.0)
         _check_range("pfsp_fraction", self.pfsp_fraction, 0.0, 1.0)
-        _check_range("self_play_fraction", self.self_play_fraction, 0.0, 1.0)
         _check_positive("rnd_coef", self.rnd_coef, allow_zero=True)
         _check_positive("rnd_coef_end", self.rnd_coef_end, allow_zero=True)
         _check_positive("rnd_anneal_battles", self.rnd_anneal_battles, allow_zero=True)

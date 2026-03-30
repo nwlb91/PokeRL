@@ -847,9 +847,9 @@ class Trainer:
     async def _run_battle_batch(self, n_battles: int):
         """Run n_battles concurrently using poke-env's built-in concurrency.
 
-        Selects opponents from the league when available, using the
-        configured main/PFSP/self-play distribution.  When a league
-        opponent is selected, only the training player collects data.
+        Selects opponents from the league with probability pfsp_fraction,
+        otherwise uses the live opponent.  When a league opponent is
+        selected, only the training player collects data.
         """
         # Decide which training player and opponent to use this batch.
         # Alternate which agent gets league exposure each batch.
@@ -873,24 +873,22 @@ class Trainer:
         use_league = False
         opponent_agent_id = live_agent.agent_id
 
-        # Try to select a league opponent
+        # Try to select a frozen league opponent (pfsp_fraction of the time)
         if self.league.agents:
             result = self.league.select_opponent(
                 training_agent.agent_id, training_team_id,
             )
             if result is not None:
                 league_agent, kind = result
-                if kind == "pfsp":
-                    # Use frozen league opponent
-                    opponent_team_id = league_agent.team_id
-                    opponent_player = await self._get_league_player(
-                        league_agent, opponent_team_id,
-                    )
-                    opponent_agent_id = league_agent.agent_id
-                    use_league = True
-                    logger.debug(
-                        f"League opponent: {league_agent.agent_id} ({kind})"
-                    )
+                opponent_team_id = league_agent.team_id
+                opponent_player = await self._get_league_player(
+                    league_agent, opponent_team_id,
+                )
+                opponent_agent_id = league_agent.agent_id
+                use_league = True
+                logger.debug(
+                    f"League opponent: {league_agent.agent_id} (pfsp)"
+                )
 
         if not use_league:
             opponent_player = live_opponent_fn()
