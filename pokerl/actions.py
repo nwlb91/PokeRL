@@ -79,11 +79,9 @@ def get_action_mask(battle: Battle, config: Config) -> np.ndarray:
                 if config.num_gimmicks >= 1 and battle.can_mega_evolve:
                     mask[10 + i] = 1.0
 
-                # Z-move
+                # Z-move — only legal if this specific move matches the Z crystal
                 if config.num_gimmicks >= 2 and battle.can_z_move:
-                    # Z-moves: only available if the Pokemon has the right Z crystal
-                    z_moves = battle.active_pokemon.available_z_moves
-                    if z_moves:
+                    if move in battle.active_pokemon.available_z_moves:
                         mask[14 + i] = 1.0
 
                 # Dynamax
