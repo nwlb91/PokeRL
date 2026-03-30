@@ -151,10 +151,11 @@ const POLL_INTERVAL = 3000;
 const chartOpts = (yMin, yMax) => ({
   responsive: true,
   animation: false,
-  interaction: { mode: 'index', intersect: false },
+  interaction: { mode: 'nearest', intersect: false },
   plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
   scales: {
-    x: { ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: '#2a2d3a' } },
+    x: { type: 'linear', title: { display: true, text: 'Battles', color: '#8b8fa3' },
+         ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: '#2a2d3a' } },
     y: { min: yMin, max: yMax, ticks: { color: '#8b8fa3' }, grid: { color: '#2a2d3a' } },
   }
 });
@@ -162,25 +163,25 @@ const chartOpts = (yMin, yMax) => ({
 const dualAxisOpts = () => ({
   responsive: true,
   animation: false,
-  interaction: { mode: 'index', intersect: false },
+  interaction: { mode: 'nearest', intersect: false },
   plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
   scales: {
-    x: { ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: '#2a2d3a' } },
+    x: { type: 'linear', title: { display: true, text: 'Battles', color: '#8b8fa3' },
+         ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: '#2a2d3a' } },
     y: { position: 'left', ticks: { color: '#8b8fa3' }, grid: { color: '#2a2d3a' } },
     y2: { position: 'right', ticks: { color: '#8b8fa3' }, grid: { drawOnChartArea: false } },
   }
 });
 
 function makeDataset(label, color, yAxis) {
-  const ds = { label, borderColor: color, backgroundColor: color + '20', data: [], pointRadius: 0, borderWidth: 2, tension: 0.3 };
+  const ds = { label, borderColor: color, backgroundColor: color + '20', data: [], pointRadius: 0, borderWidth: 2, tension: 0.3, showLine: true };
   if (yAxis) ds.yAxisID = yAxis;
   return ds;
 }
 
 const wrChart = new Chart(document.getElementById('chartWR'), {
-  type: 'line',
+  type: 'scatter',
   data: {
-    labels: [],
     datasets: [
       makeDataset('Train WR', '#6c8cff'),
       makeDataset('Greedy WR', '#4caf7c'),
@@ -192,9 +193,8 @@ const wrChart = new Chart(document.getElementById('chartWR'), {
 });
 
 const lossChart = new Chart(document.getElementById('chartLoss'), {
-  type: 'line',
+  type: 'scatter',
   data: {
-    labels: [],
     datasets: [
       makeDataset('Policy Loss', '#e05555'),
       makeDataset('Value Loss', '#6c8cff'),
@@ -204,15 +204,14 @@ const lossChart = new Chart(document.getElementById('chartLoss'), {
 });
 
 const entropyChart = new Chart(document.getElementById('chartEntropy'), {
-  type: 'line',
-  data: { labels: [], datasets: [makeDataset('Entropy', '#4caf7c')] },
+  type: 'scatter',
+  data: { datasets: [makeDataset('Entropy', '#4caf7c')] },
   options: chartOpts(0, undefined)
 });
 
 const valueChart = new Chart(document.getElementById('chartValue'), {
-  type: 'line',
+  type: 'scatter',
   data: {
-    labels: [],
     datasets: [
       makeDataset('Explained Var', '#6c8cff', 'y'),
       makeDataset('Episode Return', '#e0a050', 'y2'),
@@ -230,24 +229,16 @@ function formatTime(sec) {
 
 function pct(v) { return (v * 100).toFixed(1) + '%'; }
 
-function updateChartSeries(chart, datasetIdx, points) {
-  const labels = points.map(p => p[0]);
-  const values = points.map(p => p[1]);
-  // Use longest label set
-  if (labels.length > chart.data.labels.length) {
-    chart.data.labels = labels;
-  }
-  chart.data.datasets[datasetIdx].data = values;
+// Convert [(battle_count, value), ...] to [{x, y}, ...]
+function toXY(points) {
+  return points.map(p => ({ x: p[0], y: p[1] }));
 }
 
-function updateMetricChart(chart, datasetIdx, metrics, key) {
-  const labels = metrics.map(m => m.battle_count);
-  const values = metrics.filter(m => m[key] !== undefined).map(m => m[key]);
-  const bLabels = metrics.filter(m => m[key] !== undefined).map(m => m.battle_count);
-  if (bLabels.length > chart.data.labels.length) {
-    chart.data.labels = bLabels;
-  }
-  chart.data.datasets[datasetIdx].data = values;
+// Convert metrics array to [{x, y}, ...] for a given key
+function metricsToXY(metrics, key) {
+  return metrics
+    .filter(m => m[key] !== undefined && m[key] !== null)
+    .map(m => ({ x: m.battle_count, y: m[key] }));
 }
 
 let lastBattle = 0;
@@ -297,23 +288,23 @@ async function poll() {
       badge.textContent = 'Collecting data';
     }
 
-    // Charts
-    updateChartSeries(wrChart, 0, d.train_wr);
-    updateChartSeries(wrChart, 1, d.greedy_wr);
-    updateChartSeries(wrChart, 2, d.baseline_team1);
-    updateChartSeries(wrChart, 3, d.baseline_team2);
+    // Charts — each series plotted at its own x (battle_count)
+    wrChart.data.datasets[0].data = toXY(d.train_wr);
+    wrChart.data.datasets[1].data = toXY(d.greedy_wr);
+    wrChart.data.datasets[2].data = toXY(d.baseline_team1);
+    wrChart.data.datasets[3].data = toXY(d.baseline_team2);
     wrChart.update();
 
     if (d.metrics.length > 0) {
-      updateMetricChart(lossChart, 0, d.metrics, 'policy_loss');
-      updateMetricChart(lossChart, 1, d.metrics, 'value_loss');
+      lossChart.data.datasets[0].data = metricsToXY(d.metrics, 'policy_loss');
+      lossChart.data.datasets[1].data = metricsToXY(d.metrics, 'value_loss');
       lossChart.update();
 
-      updateMetricChart(entropyChart, 0, d.metrics, 'entropy');
+      entropyChart.data.datasets[0].data = metricsToXY(d.metrics, 'entropy');
       entropyChart.update();
 
-      updateMetricChart(valueChart, 0, d.metrics, 'explained_variance');
-      updateMetricChart(valueChart, 1, d.metrics, 'mean_episode_return');
+      valueChart.data.datasets[0].data = metricsToXY(d.metrics, 'explained_variance');
+      valueChart.data.datasets[1].data = metricsToXY(d.metrics, 'mean_episode_return');
       valueChart.update();
     }
 
