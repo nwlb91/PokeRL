@@ -66,6 +66,7 @@ class _BattleEpisodeState:
     prev_own_hp: Optional[float] = None
     prev_opp_hp: Optional[float] = None
     lstm_hidden: Optional[tuple] = None  # (h, c) LSTM hidden state
+    terminal_pbrs_correction: float = 0.0  # PBRS correction for terminal step
 
 
 @dataclass
@@ -279,7 +280,8 @@ class RLPlayer(Player):
         for step in state.pending_steps:
             self.agent.battle_buffer.add(step)
 
-        # Record final battle step
+        # Record final battle step (include PBRS terminal correction for
+        # proper potential-based reward shaping telescoping)
         if state.prev_obs is not None:
             step = RolloutStep(
                 obs=state.prev_obs,
@@ -287,7 +289,7 @@ class RLPlayer(Player):
                 action_mask=state.prev_action_mask,
                 log_prob=state.prev_log_prob,
                 value=state.prev_value,
-                reward=terminal_reward,
+                reward=terminal_reward + state.terminal_pbrs_correction,
                 done=True,
                 matchup_context=self.matchup_context,
             )

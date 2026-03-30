@@ -932,17 +932,25 @@ class Trainer:
             await self._run_battle_batch(batch_size)
             self.battle_count += batch_size
 
-            # PPO updates when either agent's buffer is full enough
-            if (len(self.agent1.battle_buffer) >= self.config.rollout_steps
-                    or len(self.agent2.battle_buffer) >= self.config.rollout_steps):
-                self._update_agents()
+            # PPO updates when each agent's own buffer is full enough
+            # (updating agents independently avoids overfitting on tiny buffers)
+            updated_battle = False
+            if len(self.agent1.battle_buffer) >= self.config.rollout_steps:
+                self._update_agent_battle(self.agent1, "Agent1")
+                updated_battle = True
+            if len(self.agent2.battle_buffer) >= self.config.rollout_steps:
+                self._update_agent_battle(self.agent2, "Agent2")
+                updated_battle = True
+            if updated_battle:
+                self._post_battle_update()
 
             # Team preview updates on a separate (lower) threshold so lead
             # selection learns at a comparable rate despite producing only
             # one sample per game.
-            if (len(self.agent1.preview_buffer) >= self.config.preview_rollout_steps
-                    or len(self.agent2.preview_buffer) >= self.config.preview_rollout_steps):
-                self._update_preview()
+            if len(self.agent1.preview_buffer) >= self.config.preview_rollout_steps:
+                self._update_agent_preview(self.agent1)
+            if len(self.agent2.preview_buffer) >= self.config.preview_rollout_steps:
+                self._update_agent_preview(self.agent2)
 
             # Periodic checkpoint + league snapshot
             if self.battle_count - self._last_checkpoint >= self.config.checkpoint_interval:
@@ -1234,16 +1242,16 @@ class Trainer:
             else:
                 self.recent_results.append(not tp_won)
 
-            # Update per-team EMA win rates for matchup-aware scaling
+            # Update per-team EMA win rates for matchup-aware scaling.
+            # Always update both teams (even during league matches where
+            # opp_ep is None) so EMAs don't become stale.
             alpha = self.config.reward_wr_ema_alpha
             if training_team_id == 0:
                 self._team1_wr_ema += alpha * (float(tp_won) - self._team1_wr_ema)
-                if opp_ep is not None:
-                    self._team2_wr_ema += alpha * (float(not tp_won) - self._team2_wr_ema)
+                self._team2_wr_ema += alpha * (float(not tp_won) - self._team2_wr_ema)
             else:
                 self._team2_wr_ema += alpha * (float(tp_won) - self._team2_wr_ema)
-                if opp_ep is not None:
-                    self._team1_wr_ema += alpha * (float(not tp_won) - self._team1_wr_ema)
+                self._team1_wr_ema += alpha * (float(not tp_won) - self._team1_wr_ema)
 
         if len(self.recent_results) > 100:
             self.recent_results = self.recent_results[-100:]
@@ -1323,6 +1331,16 @@ class Trainer:
             else:
                 step.reward = surv
 
+        # Compute terminal PBRS correction: -phi(s_{T-1}) for proper telescoping.
+        # The terminal step (created in finalize_episode) needs this so the
+        # potential-based shaping sums telescope correctly over the episode.
+        if len(observations) >= 1:
+            last_obs = np.array([observations[-1]], dtype=np.float32)
+            last_wp = self.wp_estimator.predict_batch(last_obs)[0]
+            episode.state.terminal_pbrs_correction = (
+                -self.config.wp_reward_weight * float(last_wp)
+            )
+
         # Add RND intrinsic novelty rewards
         if self.rnd is not None and len(observations) > 0:
             intrinsic = self.rnd.compute_intrinsic_rewards(observations)
@@ -1345,57 +1363,45 @@ class Trainer:
                 if param.requires_grad:
                     param.data.add_(torch.randn_like(param.data) * noise_scale)
 
-    def _update_agents(self):
-        """Run PPO updates for both agents."""
-        self.agent1.set_train()
-        self.agent2.set_train()
-
+    def _update_agent_battle(self, agent: "PPOAgent", label: str):
+        """Run PPO battle update for a single agent."""
+        agent.set_train()
         ent_coef = self._get_effective_entropy_coef()
+        metrics = agent.update_battle_policy(entropy_coef_override=ent_coef)
 
-        metrics1 = self.agent1.update_battle_policy(entropy_coef_override=ent_coef)
-        metrics2 = self.agent2.update_battle_policy(entropy_coef_override=ent_coef)
-
-        # Step LR schedulers (agent2 uses inverted metric since wr is from team1's perspective)
+        # Step LR scheduler
         wr = self._recent_win_rate()
-        self.agent1.step_lr_scheduler(metric=wr)
-        self.agent2.step_lr_scheduler(metric=1.0 - wr)
+        if agent is self.agent1:
+            agent.step_lr_scheduler(metric=wr)
+        else:
+            agent.step_lr_scheduler(metric=1.0 - wr)
 
-        if metrics1:
-            self._latest_explained_variance = metrics1.get(
-                'explained_variance', 0.0
-            )
-            self._latest_metrics = {
-                'policy_loss': metrics1.get('policy_loss', 0.0),
-                'value_loss': metrics1.get('value_loss', 0.0),
-                'entropy': metrics1.get('entropy', 0.0),
-                'explained_variance': metrics1.get('explained_variance', 0.0),
-                'mean_episode_return': metrics1.get('mean_episode_return', 0.0),
-            }
+        if metrics:
+            if agent is self.agent1:
+                self._latest_explained_variance = metrics.get(
+                    'explained_variance', 0.0
+                )
+                self._latest_metrics = {
+                    'policy_loss': metrics.get('policy_loss', 0.0),
+                    'value_loss': metrics.get('value_loss', 0.0),
+                    'entropy': metrics.get('entropy', 0.0),
+                    'explained_variance': metrics.get('explained_variance', 0.0),
+                    'mean_episode_return': metrics.get('mean_episode_return', 0.0),
+                }
             msg = (
-                f"  Agent1 battle update: "
-                f"policy_loss={metrics1.get('policy_loss', 0):.4f}, "
-                f"value_loss={metrics1.get('value_loss', 0):.4f}, "
-                f"entropy={metrics1.get('entropy', 0):.4f}, "
-                f"explained_var={metrics1.get('explained_variance', 0):.4f}, "
-                f"mean_ep_return={metrics1.get('mean_episode_return', 0):.4f}"
+                f"  {label} battle update: "
+                f"policy_loss={metrics.get('policy_loss', 0):.4f}, "
+                f"value_loss={metrics.get('value_loss', 0):.4f}, "
+                f"entropy={metrics.get('entropy', 0):.4f}, "
+                f"explained_var={metrics.get('explained_variance', 0):.4f}, "
+                f"mean_ep_return={metrics.get('mean_episode_return', 0):.4f}"
             )
-            if 'mean_uncertainty' in metrics1:
-                msg += f", uncertainty={metrics1['mean_uncertainty']:.4f}"
-            logger.debug(msg)
-        if metrics2:
-            msg = (
-                f"  Agent2 battle update: "
-                f"policy_loss={metrics2.get('policy_loss', 0):.4f}, "
-                f"value_loss={metrics2.get('value_loss', 0):.4f}, "
-                f"entropy={metrics2.get('entropy', 0):.4f}, "
-                f"explained_var={metrics2.get('explained_variance', 0):.4f}, "
-                f"mean_ep_return={metrics2.get('mean_episode_return', 0):.4f}"
-            )
-            if 'mean_uncertainty' in metrics2:
-                msg += f", uncertainty={metrics2['mean_uncertainty']:.4f}"
+            if 'mean_uncertainty' in metrics:
+                msg += f", uncertainty={metrics['mean_uncertainty']:.4f}"
             logger.debug(msg)
 
-        # Train RND predictor on collected observations
+    def _post_battle_update(self):
+        """Run post-battle-update tasks (RND training)."""
         if self.rnd is not None and len(self._rnd_observations) > 0:
             rnd_loss = self.rnd.train_predictor(self._rnd_observations)
             rnd_coef = self._get_effective_rnd_coef()
@@ -1411,18 +1417,10 @@ class Trainer:
             )
             self._rnd_observations.clear()
 
-    def _update_preview(self):
-        """Run PPO updates for both agents' team preview policies.
-
-        Uses separate rollout threshold and more PPO epochs to compensate
-        for the much sparser data (1 step per game vs ~20-40 for battle).
-        """
+    def _update_agent_preview(self, agent: "PPOAgent"):
+        """Run PPO preview update for a single agent."""
         ent_coef = self._get_effective_entropy_coef()
-        self.agent1.update_preview_policy(
-            entropy_coef_override=ent_coef,
-            ppo_epochs_override=self.config.preview_ppo_epochs,
-        )
-        self.agent2.update_preview_policy(
+        agent.update_preview_policy(
             entropy_coef_override=ent_coef,
             ppo_epochs_override=self.config.preview_ppo_epochs,
         )
