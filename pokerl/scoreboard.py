@@ -256,8 +256,11 @@ class Scoreboard:
             self.entries.append(entry)
 
         # Now determine which entries actually belong on the leaderboard
-        # by replaying the "add only if strongest" logic
-        self._rebuild_leaderboard(players_seen)
+        # by replaying the "add only if strongest" logic.
+        # Exclude "opp:" prefixed names — those are cross-team opponents
+        # that participate in the BT model but aren't leaderboard candidates.
+        leaderboard_candidates = [n for n in players_seen if not n.startswith("opp:")]
+        self._rebuild_leaderboard(leaderboard_candidates)
 
         logger.info(
             "Scoreboard team%d: loaded %d entries from log (%d total matches)",
