@@ -168,23 +168,28 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Configure logging
-    log_level = getattr(logging, args.log_level)
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    # Configure logging: console shows errors only, file gets everything
+    import sys
+    log_fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     # Fix Windows console encoding (cp1252 can't handle Unicode chars like ☆)
-    import sys
     if sys.platform == "win32":
         import io
         if hasattr(sys.stderr, 'buffer'):
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        for handler in logging.getLogger().handlers:
-            if isinstance(handler, logging.StreamHandler) and handler.stream in (sys.__stderr__, sys.__stdout__):
-                handler.stream = sys.stderr
+
+    # Console handler: errors only
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.ERROR)
+    console_handler.setFormatter(log_fmt)
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        handlers=[console_handler],
+    )
 
     if args.log_file:
         import os
@@ -192,22 +197,11 @@ def main():
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
 
-        file_handler = logging.FileHandler(args.log_file, encoding='utf-8')
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
-        logging.getLogger().addHandler(file_handler)
-
-        # Separate error-only log file
+        # Error-only log file
         error_log = args.log_file.replace('.log', '') + '_errors.log'
         error_handler = logging.FileHandler(error_log, encoding='utf-8')
         error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
+        error_handler.setFormatter(log_fmt)
         logging.getLogger().addHandler(error_handler)
 
     # Build config
