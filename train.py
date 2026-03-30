@@ -175,14 +175,40 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # Fix Windows console encoding (cp1252 can't handle Unicode chars like ☆)
+    import sys
+    if sys.platform == "win32":
+        import io
+        if hasattr(sys.stderr, 'buffer'):
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and handler.stream in (sys.__stderr__, sys.__stdout__):
+                handler.stream = sys.stderr
+
     if args.log_file:
-        file_handler = logging.FileHandler(args.log_file)
+        import os
+        log_dir = os.path.dirname(args.log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        file_handler = logging.FileHandler(args.log_file, encoding='utf-8')
         file_handler.setLevel(log_level)
         file_handler.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         ))
         logging.getLogger().addHandler(file_handler)
+
+        # Separate error-only log file
+        error_log = args.log_file.replace('.log', '') + '_errors.log'
+        error_handler = logging.FileHandler(error_log, encoding='utf-8')
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logging.getLogger().addHandler(error_handler)
 
     # Build config
     config = Config(

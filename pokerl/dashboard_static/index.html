@@ -319,11 +319,12 @@ async function poll() {
 
     lastBattle = d.battle_count;
   } catch (e) {
+    console.error('Dashboard poll error:', e);
     document.getElementById('statusDot').className = 'status-dot offline';
   }
 }
 
-// Mark stale if no update for 30s
+// Mark stale if server is reachable but trainer hasn't sent data recently
 setInterval(() => {
   if (Date.now() - lastUpdate > 30000) {
     document.getElementById('statusDot').className = 'status-dot stale';
